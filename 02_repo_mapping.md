@@ -1,67 +1,77 @@
-# Week 02: Build A Repo Mapper Before Editing
+# Week 02: Build Repo Context For The Agent
 
 This week teaches the second habit of building a Claude Code-style coding
 agent:
 
 ```text
-the agent should map the repo before it plans a change
+the model chooses tools better when the runtime gives it repo context
 ```
 
-You will build a tiny repo mapper. It will count files, identify important
-directories, guess likely entrypoints, and produce a short markdown summary.
-No file editing yet.
+Week 01 built the first turn loop:
+
+```text
+prompt -> model decision -> validation -> result -> transcript
+```
+
+Week 02 adds the missing input that makes the loop feel like a coding agent:
+
+```text
+repo path -> repo map -> model context -> better model decision
+```
+
+You will build a tiny repo mapper. It will scan a project, ignore noisy folders,
+identify likely entrypoints and tests, and render a short summary that can be
+shown to the model in a later turn.
 
 Work through this file from top to bottom. Every task appears inside the lesson
 at the moment you need it.
 
 ## Step 1: Understand The Job Of Week 02
 
-Week 01 built the turn loop:
+In Week 01, the mock model could request tools like:
 
 ```text
-prompt -> route -> result -> transcript
+read_file
+run_tests
 ```
 
-Week 02 adds repo context:
+But the model did not know anything about the repo.
+
+That is the problem Week 02 solves. Before the model decides what to do, the
+runtime should be able to summarize:
 
 ```text
-repo path -> file scan -> repo map -> agent turn
+where the repo is
+what top-level folders exist
+which files look like entrypoints
+which files look like tests
+how large the repo is
 ```
 
-A coding agent should not start with:
+This is not tool execution yet. It is context building.
 
-```text
-I will edit some file that sounds relevant.
-```
+## Step 2: Learn The Repo Context Shape
 
-It should start with:
-
-```text
-I know the repo roots, likely entrypoints, test locations, and current file map.
-```
-
-That is what this lesson builds.
-
-## Step 2: Learn The Repo Map Shape
-
-A useful repo map is short. It should answer:
-
-```text
-where is the repo?
-what are the top-level directories?
-where does the app likely start?
-where are the tests?
-what files look important?
-what should the agent inspect before editing?
-```
-
-Use a data model instead of loose strings:
+Start with the output shape first.
 
 ```python
 from dataclasses import dataclass
 from pathlib import Path
+```
 
+These imports do two jobs:
 
+```text
+dataclass:
+    lets us create small structured records
+
+Path:
+    gives us safer filesystem paths than raw strings
+```
+
+Now define the map:
+
+```python
 @dataclass(frozen=True)
 class RepoMap:
     root: Path
@@ -72,11 +82,41 @@ class RepoMap:
     total_files: int
 ```
 
-This gives the agent a structured object it can pass into later planning code.
+Read each field as a sentence:
 
-## Step 3: Walk The Repo Safely
+```text
+root:
+    the repo path being summarized
 
-Start with a small scanner:
+top_level_dirs:
+    the main project zones, like claudecode, tests, examples
+
+top_level_files:
+    metadata files, like README.md or pyproject.toml
+
+entrypoint_candidates:
+    files that might start the app or CLI
+
+test_candidates:
+    files the agent might run or inspect for verification
+
+total_files:
+    a rough size signal for the repo
+```
+
+This is the first bridge from Week 01 to Week 02:
+
+```text
+Week 01 ToolSpec tells the model what it can do.
+Week 02 RepoMap tells the model where it is.
+```
+
+## Step 3: Ignore Noise Before Scanning
+
+A coding agent should not waste context on cache folders, dependency folders,
+or git internals.
+
+Start with a small ignore list:
 
 ```python
 IGNORE_DIRS = {
@@ -87,36 +127,126 @@ IGNORE_DIRS = {
     "dist",
     "build",
 }
-
-
-def iter_repo_files(root: Path) -> list[Path]:
-    files: list[Path] = []
-    for path in root.rglob("*"):
-        if any(part in IGNORE_DIRS for part in path.parts):
-            continue
-        if path.is_file():
-            files.append(path)
-    return files
 ```
 
-The ignore list matters. A coding agent should avoid wasting context on build
-artifacts, dependency folders, caches, and git internals.
+Why these names?
 
-This is the first repo-mapping rule:
+```text
+.git:
+    internal git database
+
+.venv:
+    local Python environment
+
+__pycache__:
+    generated Python cache
+
+node_modules:
+    installed JavaScript dependencies
+
+dist and build:
+    generated build outputs
+```
+
+The rule is:
 
 ```text
 scan source, not noise
 ```
 
-## Step 4: Identify Top-Level Shape
+## Step 4: Write A Helper For Ignored Paths
 
-Now collect top-level files and directories:
+Before walking files, write one tiny helper:
+
+```python
+def is_ignored(path: Path) -> bool:
+    return any(part in IGNORE_DIRS for part in path.parts)
+```
+
+Break it down:
+
+```text
+path.parts:
+    turns /repo/src/main.py into pieces like "/", "repo", "src", "main.py"
+
+any(...):
+    returns True if any piece is in IGNORE_DIRS
+```
+
+Example:
+
+```text
+/repo/.git/config:
+    ignored, because ".git" appears in path.parts
+
+/repo/claudecode/agent.py:
+    not ignored
+```
+
+Small helper functions like this make the bigger scanner easier to read.
+
+## Step 5: Walk The Repo Files
+
+Now write the file scanner:
+
+```python
+def iter_repo_files(root: Path) -> list[Path]:
+    files: list[Path] = []
+
+    for path in root.rglob("*"):
+        if is_ignored(path):
+            continue
+        if path.is_file():
+            files.append(path)
+
+    return files
+```
+
+Read it line by line:
+
+```text
+files = []:
+    start with an empty list
+
+root.rglob("*"):
+    visit everything under the repo root
+
+if is_ignored(path):
+    skip noisy paths
+
+if path.is_file():
+    keep files, not directories
+
+return files:
+    give the rest of the mapper a clean file list
+```
+
+This function is intentionally simple. Later you can add max file limits,
+binary-file detection, `.gitignore` support, or token budgeting.
+
+## Step 6: Capture Top-Level Shape
+
+The first glance at a repo is its top level.
 
 ```python
 def top_level_shape(root: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
     dirs: list[str] = []
     files: list[str] = []
+```
 
+This function returns two groups:
+
+```text
+dirs:
+    top-level directories
+
+files:
+    top-level files
+```
+
+Now fill the groups:
+
+```python
     for child in sorted(root.iterdir()):
         if child.name in IGNORE_DIRS:
             continue
@@ -124,35 +254,38 @@ def top_level_shape(root: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
             dirs.append(child.name)
         elif child.is_file():
             files.append(child.name)
+```
 
+Line by line:
+
+```text
+root.iterdir():
+    only looks at direct children, not the whole tree
+
+sorted(...):
+    makes output stable and easy to compare
+
+child.name in IGNORE_DIRS:
+    hides noisy top-level folders
+
+child.is_dir() / child.is_file():
+    separates project zones from metadata files
+```
+
+Return immutable tuples:
+
+```python
     return tuple(dirs), tuple(files)
 ```
 
-Read this like a first glance at the project:
+Tuples are useful here because the map is a snapshot. The agent should not
+mutate it by accident.
 
-```text
-directories tell you the project zones
-files tell you the project metadata
-```
+## Step 7: Guess Entrypoints
 
-For example:
+An entrypoint is a file that might start the app, CLI, or package.
 
-```text
-claudecode/
-examples/
-tests/
-README.md
-pyproject.toml
-```
-
-That already tells you this is probably a Python project with package code,
-examples, tests, and install metadata.
-
-## Step 5: Guess Entrypoints
-
-An entrypoint is where execution may begin.
-
-Start with obvious filename patterns:
+Start with obvious names:
 
 ```python
 ENTRYPOINT_NAMES = {
@@ -161,61 +294,73 @@ ENTRYPOINT_NAMES = {
     "app.py",
     "__main__.py",
 }
+```
 
+Then search the scanned files:
 
+```python
 def find_entrypoints(root: Path, files: list[Path]) -> tuple[str, ...]:
     candidates: list[str] = []
+
     for path in files:
         if path.name in ENTRYPOINT_NAMES:
             candidates.append(str(path.relative_to(root)))
+
     return tuple(sorted(candidates))
 ```
 
-This is only a guess. Good repo mapping is honest about guesses.
-
-The right wording is:
+Important detail:
 
 ```text
-entrypoint candidates
+path.relative_to(root):
+    turns /repo/claudecode/agent.py into claudecode/agent.py
 ```
 
-not:
+Relative paths are better for model context because they are short and portable.
+
+Call them candidates because this is a guess:
 
 ```text
-the entrypoint
+entrypoint_candidates, not guaranteed_entrypoints
 ```
 
-That small distinction keeps the agent from pretending certainty too early.
+That honesty matters. Good agents do not pretend they know more than they do.
 
-## Step 6: Find Tests
+## Step 8: Find Tests
 
 Tests are the agent's first safety rail.
 
-Use common patterns:
+Use simple patterns:
 
 ```python
 def find_tests(root: Path, files: list[Path]) -> tuple[str, ...]:
     tests: list[str] = []
+
     for path in files:
         relative = path.relative_to(root)
         parts = relative.parts
         if "tests" in parts or path.name.startswith("test_"):
             tests.append(str(relative))
+
     return tuple(sorted(tests))
 ```
 
-A coding agent should always ask:
+Break down the condition:
 
 ```text
-how will I know if my change worked?
+"tests" in parts:
+    catches tests/test_agent.py and app/tests/test_cli.py
+
+path.name.startswith("test_"):
+    catches test_agent.py even if it is not inside a tests folder
 ```
 
-Finding tests does not prove the repo is safe to edit. It gives the agent a
-starting point for verification.
+A real agent will eventually run tests. This week it only learns where tests
+probably are.
 
-## Step 7: Build The Repo Map
+## Step 9: Build The Repo Map
 
-Now combine the pieces:
+Now combine the smaller pieces:
 
 ```python
 def build_repo_map(root: str | Path) -> RepoMap:
@@ -233,52 +378,75 @@ def build_repo_map(root: str | Path) -> RepoMap:
     )
 ```
 
-This is the first useful repo context object for your agent.
-
-Later, the turn loop can do this:
+Read the flow:
 
 ```text
-receive prompt
-build repo map
-route prompt with repo context
-choose first files to inspect
+normalize the input path
+scan useful files
+capture top-level shape
+derive entrypoint candidates
+derive test candidates
+return one structured RepoMap
 ```
 
-Week 02 stops at the repo map.
+This is the full Week 02 product.
 
-## Step 8: Render The Map For Humans
+## Step 10: Render Model Context
 
-Agents need structured data. Humans need readable summaries.
+The model should not receive the raw Python object. It needs a short text
+summary.
 
-Add a markdown renderer:
+Start with the header:
 
 ```python
-def render_repo_map(repo_map: RepoMap) -> str:
+def render_repo_context(repo_map: RepoMap) -> str:
     lines = [
-        "# Repo Map",
-        "",
-        f"Root: `{repo_map.root}`",
-        f"Total files: {repo_map.total_files}",
-        "",
-        "## Top-Level Directories",
-        *(f"- `{name}`" for name in repo_map.top_level_dirs),
-        "",
-        "## Top-Level Files",
-        *(f"- `{name}`" for name in repo_map.top_level_files),
-        "",
-        "## Entrypoint Candidates",
-        *(f"- `{path}`" for path in repo_map.entrypoint_candidates),
-        "",
-        "## Test Candidates",
-        *(f"- `{path}`" for path in repo_map.test_candidates),
+        "Repo context:",
+        f"- root: {repo_map.root}",
+        f"- total files: {repo_map.total_files}",
     ]
+```
+
+Then add a tiny helper inside the function:
+
+```python
+    def add_section(title: str, values: tuple[str, ...]) -> None:
+        lines.append(f"- {title}:")
+        if values:
+            lines.extend(f"  - {value}" for value in values[:10])
+        else:
+            lines.append("  - none found")
+```
+
+Why `values[:10]`?
+
+```text
+model context should be useful, not endless
+```
+
+Now add the sections:
+
+```python
+    add_section("top-level dirs", repo_map.top_level_dirs)
+    add_section("top-level files", repo_map.top_level_files)
+    add_section("entrypoint candidates", repo_map.entrypoint_candidates)
+    add_section("test candidates", repo_map.test_candidates)
     return "\n".join(lines)
 ```
 
-This gives the agent something it can show in a terminal, write to a note, or
-include in a planning step.
+This renderer is the natural continuation of Week 01. Later, the turn loop can
+send this string alongside the prompt and tool specs:
 
-## Step 9: Add A Tiny CLI
+```text
+prompt
+tool specs
+repo context
+transcript
+```
+
+Then the model can make a better `ModelDecision`.
+
+## Step 11: Add A Tiny CLI
 
 Give the mapper a command-line entrypoint:
 
@@ -291,10 +459,13 @@ def main() -> int:
     args = parser.parse_args()
 
     repo_map = build_repo_map(args.path)
-    print(render_repo_map(repo_map))
+    print(render_repo_context(repo_map))
     return 0
+```
 
+And finish the module:
 
+```python
 if __name__ == "__main__":
     raise SystemExit(main())
 ```
@@ -305,41 +476,15 @@ Now the learner can run:
 python -m claudecode.repo_map .
 ```
 
-This is the second course pattern:
+This is the course pattern:
 
 ```text
 build a small feature
 make it runnable
-make its output readable
+make its output useful to the future agent loop
 ```
 
-## Step 10: Connect Repo Mapping To The Agent Loop
-
-Week 01 routed only from the prompt. Week 02 prepares the next upgrade:
-
-```python
-@dataclass(frozen=True)
-class AgentContext:
-    repo_map: RepoMap
-```
-
-In a later lesson, the agent turn will accept context:
-
-```python
-def run_turn(self, prompt: str, context: AgentContext) -> TurnResult:
-    ...
-```
-
-That is the bridge from chatbot to coding agent:
-
-```text
-the agent responds with knowledge of the repo it is inside
-```
-
-Do not wire everything together yet. Keep the repo mapper independent and easy
-to test.
-
-## Step 11: The Week 02 Build
+## Step 12: The Week 02 Build
 
 Your build this week is one small file:
 
@@ -352,32 +497,37 @@ It should contain:
 ```text
 RepoMap
 IGNORE_DIRS
+is_ignored
 iter_repo_files
 top_level_shape
+ENTRYPOINT_NAMES
 find_entrypoints
 find_tests
 build_repo_map
-render_repo_map
+render_repo_context
 main
 ```
 
 Optional tiny smoke test:
 
 ```python
-def test_repo_map_finds_tests(tmp_path):
-    (tmp_path / "src").mkdir()
+def test_repo_map_finds_entrypoints_and_tests(tmp_path):
+    (tmp_path / "claudecode").mkdir()
     (tmp_path / "tests").mkdir()
-    (tmp_path / "src" / "main.py").write_text("print('hi')\n")
-    (tmp_path / "tests" / "test_app.py").write_text("def test_ok(): pass\n")
+    (tmp_path / "claudecode" / "cli.py").write_text("print('hi')\n")
+    (tmp_path / "tests" / "test_agent.py").write_text("def test_ok(): pass\n")
 
     repo_map = build_repo_map(tmp_path)
 
-    assert "src" in repo_map.top_level_dirs
-    assert "tests/test_app.py" in repo_map.test_candidates
-    assert "src/main.py" in repo_map.entrypoint_candidates
+    assert "claudecode" in repo_map.top_level_dirs
+    assert "claudecode/cli.py" in repo_map.entrypoint_candidates
+    assert "tests/test_agent.py" in repo_map.test_candidates
 ```
 
-## Step 12: Done Checklist
+This test builds a fake repo in a temporary folder, maps it, and checks the
+important outputs. It is small on purpose.
+
+## Step 13: Done Checklist
 
 You are done when:
 
@@ -386,8 +536,9 @@ You are done when:
 - the map includes top-level directories and files
 - the map includes entrypoint candidates
 - the map includes test candidates
-- `render_repo_map` returns readable markdown
-- `python -m claudecode.repo_map .` prints the map
+- `render_repo_context` returns short model-ready text
+- `python -m claudecode.repo_map .` prints the context
+- you can explain how repo context will feed the Week 01 model decision loop
 
 Stop there.
 
@@ -398,13 +549,15 @@ Use this format:
 ```text
 Week 02 Submission
 
-My repo mapper in one sentence:
+My repo context builder in one sentence:
 
 Top-level dirs it found:
 
 Entrypoint candidates:
 
 Test candidates:
+
+How this connects to Week 01:
 
 One thing I want reviewed:
 ```
