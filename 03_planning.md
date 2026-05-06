@@ -1,9 +1,9 @@
-# Week 03: Build A Plan Before Tool Execution
+# Week 03: Build Plan Mode
 
 This week teaches the third habit of building a Claude Code-style coding agent:
 
 ```text
-the agent should plan before it edits
+planning is an explicit mode for non-trivial work, not a mandatory step before every turn
 ```
 
 Week 01 built the turn loop:
@@ -18,56 +18,92 @@ Week 02 added repo context:
 repo path -> repo map -> model context -> better model decision
 ```
 
-Week 03 adds the next missing layer:
+Week 03 adds an explicit planning surface:
 
 ```text
-prompt + repo map -> plan -> tool calls
+normal mode -> enter plan mode -> draft plan -> exit plan mode
 ```
 
-You will build a tiny planner. It will turn a user request and a `RepoMap` into
-a short list of inspection, edit, and verification steps. It will not edit files
-yet. Planning is the bridge between "the model wants to do something" and "the
-runtime is allowed to touch the repo."
+A real coding agent can answer simple questions or inspect files without a
+formal plan. But for larger edits, risky changes, or multi-file work, plan mode
+slows the agent down and makes its intent reviewable before execution.
 
 Work through this file from top to bottom. Every task appears inside the lesson
 at the moment you need it.
 
 ## Step 1: Understand The Job Of Week 03
 
-A weak coding agent jumps from request to edit:
+Plan mode is a state.
+
+In normal mode, the agent can do lightweight work:
 
 ```text
-user: add a CLI command
-agent: edits random file
+answer a question
+read a file
+summarize the repo
+run a harmless check
 ```
 
-A stronger coding agent creates a plan first:
+In plan mode, the agent should avoid edits and produce a plan:
 
 ```text
-1. inspect likely CLI entrypoint
-2. inspect tests
-3. add the command in one small file
-4. add or update one focused test
-5. run the test command
+inspect likely files
+name the intended change
+name the verification step
+wait for approval or exit
 ```
-
-This is not bureaucracy. It is how the agent makes its work reviewable.
 
 The Week 03 rule is:
 
 ```text
-do not execute an edit until the plan names what will be inspected, changed, and verified
+use plan mode when the work is too large or risky to jump straight into execution
 ```
 
-## Step 2: Learn The Planning Shape
+That is closer to a Claude Code-style workflow than saying every turn must run
+through a planner.
 
-Start with three small objects:
+## Step 2: Define Agent Modes
+
+Start with a small mode type:
 
 ```python
 from dataclasses import dataclass
+from enum import Enum
 ```
 
-The first object is one step:
+`Enum` gives us named states:
+
+```python
+class AgentMode(str, Enum):
+    NORMAL = "normal"
+    PLAN = "plan"
+```
+
+Why use an enum instead of plain strings?
+
+```text
+plain strings:
+    easy to mistype
+
+enum values:
+    constrained to the modes the runtime understands
+```
+
+The first two modes are enough:
+
+```text
+normal:
+    regular agent behavior
+
+plan:
+    planning-only behavior before edits
+```
+
+## Step 3: Define Plan Data
+
+Plan mode needs a structured output.
+
+First define one step:
 
 ```python
 @dataclass(frozen=True)
@@ -90,7 +126,7 @@ reason:
     why this step belongs in the plan
 ```
 
-The second object is the full plan:
+Now define the full plan:
 
 ```python
 @dataclass(frozen=True)
@@ -100,32 +136,57 @@ class AgentPlan:
     steps: tuple[PlanStep, ...]
 ```
 
-The plan keeps the original request, a one-sentence summary, and ordered steps.
-
-The third object describes the kind of work:
-
-```python
-@dataclass(frozen=True)
-class RequestKind:
-    name: str
-    confidence: float
-```
-
-This lets the agent say:
+The plan keeps:
 
 ```text
-I think this is a feature request, but I am not 100 percent sure.
+request:
+    the user's original task
+
+summary:
+    one sentence describing the plan
+
+steps:
+    ordered work items the user can review
 ```
 
-Confidence should make the plan more honest, not more complicated.
+## Step 4: Define Plan Mode State
 
-## Step 3: Classify The Request
-
-The real model can classify requests semantically. For the from-scratch build,
-use a tiny deterministic classifier so the planner is runnable.
+The runtime needs to remember whether it is currently planning.
 
 ```python
-def classify_request(request: str) -> RequestKind:
+@dataclass
+class AgentState:
+    mode: AgentMode = AgentMode.NORMAL
+    active_plan: AgentPlan | None = None
+```
+
+Break it down:
+
+```text
+mode:
+    tells the runtime how to behave on the next turn
+
+active_plan:
+    stores the current draft plan, if one exists
+```
+
+This is a small but important shift from Week 01:
+
+```text
+Week 01 stored transcript state.
+Week 03 stores mode state.
+```
+
+Mode state lets the agent behave differently without changing the whole runtime.
+
+## Step 5: Decide When To Suggest Plan Mode
+
+Do not enter plan mode for everything.
+
+Use a tiny heuristic:
+
+```python
+def should_enter_plan_mode(request: str) -> bool:
     lowered = request.lower()
 ```
 
@@ -133,71 +194,64 @@ Start by normalizing the request:
 
 ```text
 lowered:
-    makes "Add", "add", and "ADD" behave the same
+    lets "Refactor" and "refactor" match the same way
 ```
 
-Now add a few simple categories:
+Now detect non-trivial work:
 
 ```python
-    if any(word in lowered for word in ("add", "create", "implement")):
-        return RequestKind("feature", 0.7)
-
-    if any(word in lowered for word in ("fix", "bug", "broken", "failing")):
-        return RequestKind("bugfix", 0.7)
-
-    if any(word in lowered for word in ("explain", "summarize", "document")):
-        return RequestKind("explanation", 0.7)
-
-    return RequestKind("unknown", 0.3)
+    planning_words = (
+        "refactor",
+        "redesign",
+        "migrate",
+        "multi-file",
+        "architecture",
+        "from scratch",
+    )
+    return any(word in lowered for word in planning_words)
 ```
 
-This is not replacing the LLM. It is a teaching scaffold.
+This heuristic is intentionally simple. In a real agent, the model can decide
+when plan mode is useful from the prompt, repo context, and transcript.
 
-The future architecture is:
+The runtime still needs a simple policy:
 
 ```text
-LLM classifies intent from prompt + repo context + transcript
-runtime stores the classification in a structured plan
+small request:
+    normal mode is fine
+
+large or risky request:
+    suggest or enter plan mode
 ```
 
-Week 03 uses a small function so you can build the runtime shape first.
+## Step 6: Choose Inspection Targets From Repo Context
 
-## Step 4: Pick Files To Inspect
-
-The planner should use the `RepoMap` from Week 02.
-
-Import it:
+Plan mode should use the `RepoMap` from Week 02.
 
 ```python
 from .repo_map import RepoMap
 ```
 
-Now write a helper that chooses inspection targets:
+Write a helper that picks likely files:
 
 ```python
-def choose_inspection_targets(repo_map: RepoMap) -> tuple[str, ...]:
+def choose_plan_targets(repo_map: RepoMap) -> tuple[str, ...]:
     targets: list[str] = []
-```
-
-Start with likely entrypoints:
-
-```python
     targets.extend(repo_map.entrypoint_candidates[:3])
-```
-
-Why only three?
-
-```text
-plans should stay small enough to follow
-```
-
-Then add tests:
-
-```python
     targets.extend(repo_map.test_candidates[:3])
 ```
 
-Finally, use top-level metadata files:
+This starts with:
+
+```text
+entrypoint candidates:
+    where behavior may begin
+
+test candidates:
+    where verification may happen
+```
+
+Add metadata files:
 
 ```python
     for name in ("README.md", "pyproject.toml", "package.json"):
@@ -205,192 +259,88 @@ Finally, use top-level metadata files:
             targets.append(name)
 ```
 
-Remove duplicates while preserving order:
+Remove duplicates:
 
 ```python
     return tuple(dict.fromkeys(targets))
 ```
 
-That last line is a compact Python trick:
+Why this matters:
 
 ```text
-dict.fromkeys(targets):
-    keeps the first copy of each value
-
-tuple(...):
-    returns an immutable snapshot
+plan mode should propose a small inspection set before proposing edits
 ```
 
-The goal is not perfect file selection. The goal is to give the model a small,
-reasonable first inspection list.
+The model can later refine this list. The runtime gives it a useful starting
+point.
 
-## Step 5: Build The First Plan Steps
+## Step 7: Draft A Plan
 
-Planning should always start with inspection.
+Now build the plan.
 
 ```python
-def build_inspection_steps(targets: tuple[str, ...]) -> list[PlanStep]:
+def draft_plan(request: str, repo_map: RepoMap) -> AgentPlan:
+    targets = choose_plan_targets(repo_map)
     steps: list[PlanStep] = []
+```
 
+Start with inspection steps:
+
+```python
     for target in targets:
         steps.append(
             PlanStep(
                 action="inspect",
                 target=target,
-                reason="Understand the relevant code before editing.",
+                reason="Understand the relevant code before execution.",
             )
         )
-
-    return steps
 ```
 
-This loop says:
-
-```text
-for each likely target
-create one inspect step
-explain why it exists
-```
-
-The reason field matters. A coding agent should be able to explain why it wants
-to open a file.
-
-## Step 6: Add Intent-Specific Steps
-
-Now add steps based on the request kind.
+Then add the intended edit step:
 
 ```python
-def build_intent_steps(kind: RequestKind) -> list[PlanStep]:
-    if kind.name == "feature":
-        return [
-            PlanStep(
-                action="edit",
-                target="smallest relevant source file",
-                reason="Implement the requested behavior in the narrowest place.",
-            ),
-            PlanStep(
-                action="test",
-                target="focused test command",
-                reason="Verify the new behavior works.",
-            ),
-        ]
-```
-
-For bug fixes:
-
-```python
-    if kind.name == "bugfix":
-        return [
-            PlanStep(
-                action="inspect",
-                target="failing test or error output",
-                reason="Reproduce or understand the failure before editing.",
-            ),
-            PlanStep(
-                action="edit",
-                target="smallest file causing the failure",
-                reason="Fix the behavior with minimal blast radius.",
-            ),
-            PlanStep(
-                action="test",
-                target="failing test command",
-                reason="Confirm the fix addresses the original failure.",
-            ),
-        ]
-```
-
-For explanation requests:
-
-```python
-    if kind.name == "explanation":
-        return [
-            PlanStep(
-                action="report",
-                target="plain-language answer",
-                reason="The request may not require code changes.",
-            )
-        ]
-```
-
-Fallback:
-
-```python
-    return [
+    steps.append(
         PlanStep(
-            action="report",
-            target="clarifying summary",
-            reason="The request is too ambiguous for an edit plan.",
+            action="edit",
+            target="smallest relevant source file",
+            reason="Keep the change narrow and reviewable.",
         )
-    ]
+    )
 ```
 
-This structure mirrors how serious coding agents behave:
-
-```text
-feature:
-    inspect -> edit -> test
-
-bugfix:
-    reproduce -> edit -> test
-
-explanation:
-    inspect -> report
-
-unknown:
-    clarify before editing
-```
-
-## Step 7: Build The Full Plan
-
-Now combine request classification, repo context, and steps:
+Then add verification:
 
 ```python
-def build_plan(request: str, repo_map: RepoMap) -> AgentPlan:
-    kind = classify_request(request)
-    targets = choose_inspection_targets(repo_map)
-    steps = [
-        *build_inspection_steps(targets),
-        *build_intent_steps(kind),
-    ]
+    steps.append(
+        PlanStep(
+            action="test",
+            target="focused test command",
+            reason="Verify the behavior before reporting success.",
+        )
+    )
 ```
 
-Break it down:
-
-```text
-kind:
-    what type of request this seems to be
-
-targets:
-    likely files to inspect from the repo map
-
-steps:
-    inspection steps first, then intent-specific steps
-```
-
-Now return the plan:
+Return the plan:
 
 ```python
     return AgentPlan(
         request=request,
-        summary=f"{kind.name} request with {len(steps)} planned steps",
+        summary=f"Plan mode draft with {len(steps)} steps.",
         steps=tuple(steps),
     )
 ```
 
-This is the Week 03 product:
-
-```text
-request + repo map -> structured plan
-```
+This is not the agent editing. This is the agent preparing a reviewable plan.
 
 ## Step 8: Render The Plan
 
-The model and runtime need structured data. Humans need readable output.
+Humans need readable output.
 
 ```python
 def render_plan(plan: AgentPlan) -> str:
     lines = [
-        "# Agent Plan",
+        "# Plan Mode Draft",
         "",
         f"Request: {plan.request}",
         f"Summary: {plan.summary}",
@@ -399,7 +349,7 @@ def render_plan(plan: AgentPlan) -> str:
     ]
 ```
 
-Then list the steps:
+Now add numbered steps:
 
 ```python
     for index, step in enumerate(plan.steps, start=1):
@@ -408,10 +358,10 @@ Then list the steps:
         )
 ```
 
-Why `enumerate(..., start=1)`?
+Why numbered steps?
 
 ```text
-plans are easier to review when steps are numbered from 1
+the user can approve, reject, or discuss a specific step
 ```
 
 Finish:
@@ -420,9 +370,50 @@ Finish:
     return "\n".join(lines)
 ```
 
-This renderer will eventually be appended to the transcript before edits begin.
+This renderer is what the agent can append to the transcript and show to the
+user while in plan mode.
 
-## Step 9: Connect Planning To The Existing Loop
+## Step 9: Enter And Exit Plan Mode
+
+Add two runtime helpers:
+
+```python
+def enter_plan_mode(state: AgentState, request: str, repo_map: RepoMap) -> AgentPlan:
+    plan = draft_plan(request, repo_map)
+    state.mode = AgentMode.PLAN
+    state.active_plan = plan
+    return plan
+```
+
+Line by line:
+
+```text
+draft_plan:
+    creates the proposed plan
+
+state.mode = AgentMode.PLAN:
+    changes runtime behavior
+
+state.active_plan = plan:
+    stores the plan for the next turn
+```
+
+Now exit:
+
+```python
+def exit_plan_mode(state: AgentState) -> AgentPlan | None:
+    plan = state.active_plan
+    state.mode = AgentMode.NORMAL
+    state.active_plan = None
+    return plan
+```
+
+Exiting plan mode does not execute the plan yet. It simply returns the accepted
+or abandoned draft and switches back to normal mode.
+
+The course will execute real edits later.
+
+## Step 10: Connect Plan Mode To The Agent Loop
 
 Week 01 had:
 
@@ -433,47 +424,40 @@ prompt -> model decision -> validation -> result -> transcript
 Week 02 added:
 
 ```text
-repo map -> model context
+repo context
 ```
 
 Week 03 adds:
 
 ```text
-model context + prompt -> plan
+mode state
 ```
 
 In a future `CodingAgent.run_turn`, the runtime can do:
 
 ```python
-repo_map = build_repo_map(".")
-plan = build_plan(prompt, repo_map)
-self.transcript.append("plan", render_plan(plan))
+if should_enter_plan_mode(prompt):
+    repo_map = build_repo_map(".")
+    plan = enter_plan_mode(self.state, prompt, repo_map)
+    self.transcript.append("plan", render_plan(plan))
+    return
 ```
 
-Then the model can decide the next tool call with:
+Normal mode still exists. A tiny request does not need a formal plan.
+
+Plan mode is for work where the user should see intent before execution:
 
 ```text
-prompt
-tool specs
-repo context
-plan
-transcript
+refactors
+migrations
+architecture changes
+multi-file edits
+ambiguous implementation requests
 ```
 
-This is the natural order:
+## Step 11: Add A Tiny CLI
 
-```text
-map first
-plan second
-edit third
-test fourth
-```
-
-Week 03 stops at planning.
-
-## Step 10: Add A Tiny CLI
-
-Give the planner a command-line entrypoint:
+Give plan mode a command-line demo:
 
 ```python
 def main() -> int:
@@ -485,8 +469,9 @@ def main() -> int:
     parser.add_argument("--path", default=".")
     args = parser.parse_args()
 
+    state = AgentState()
     repo_map = build_repo_map(args.path)
-    plan = build_plan(args.request, repo_map)
+    plan = enter_plan_mode(state, args.request, repo_map)
     print(render_plan(plan))
     return 0
 ```
@@ -501,31 +486,32 @@ if __name__ == "__main__":
 Now the learner can run:
 
 ```bash
-python -m claudecode.planning "add a repo map command"
+python -m claudecode.plan_mode "refactor the CLI"
 ```
 
-The command should print a short plan, not edit files.
+The command should print a plan mode draft and make no edits.
 
-## Step 11: The Week 03 Build
+## Step 12: The Week 03 Build
 
 Your build this week is one small file:
 
 ```text
-claudecode/planning.py
+claudecode/plan_mode.py
 ```
 
 It should contain:
 
 ```text
+AgentMode
 PlanStep
 AgentPlan
-RequestKind
-classify_request
-choose_inspection_targets
-build_inspection_steps
-build_intent_steps
-build_plan
+AgentState
+should_enter_plan_mode
+choose_plan_targets
+draft_plan
 render_plan
+enter_plan_mode
+exit_plan_mode
 main
 ```
 
@@ -534,11 +520,12 @@ Optional tiny smoke test:
 ```python
 from pathlib import Path
 
-from claudecode.planning import build_plan
+from claudecode.plan_mode import AgentMode, AgentState, enter_plan_mode, exit_plan_mode
 from claudecode.repo_map import RepoMap
 
 
-def test_feature_plan_starts_with_inspection():
+def test_plan_mode_enters_and_exits():
+    state = AgentState()
     repo_map = RepoMap(
         root=Path("."),
         top_level_dirs=("claudecode", "tests"),
@@ -548,32 +535,37 @@ def test_feature_plan_starts_with_inspection():
         total_files=3,
     )
 
-    plan = build_plan("add a CLI command", repo_map)
+    plan = enter_plan_mode(state, "refactor the CLI", repo_map)
 
-    assert plan.steps[0].action == "inspect"
-    assert any(step.action == "edit" for step in plan.steps)
-    assert any(step.action == "test" for step in plan.steps)
+    assert state.mode == AgentMode.PLAN
+    assert state.active_plan == plan
+
+    exited = exit_plan_mode(state)
+
+    assert exited == plan
+    assert state.mode == AgentMode.NORMAL
+    assert state.active_plan is None
 ```
 
 This test proves the important behavior:
 
 ```text
-feature requests inspect before edit and test
+plan mode is stateful and reversible
 ```
 
-## Step 12: Done Checklist
+## Step 13: Done Checklist
 
 You are done when:
 
-- `classify_request` returns a `RequestKind`
-- `choose_inspection_targets` uses `RepoMap`
-- `build_plan` creates inspection steps before edit steps
-- feature requests include edit and test steps
-- bugfix requests include failure inspection and test steps
-- explanation requests can avoid edits
+- `AgentMode` has `NORMAL` and `PLAN`
+- `AgentState` stores the current mode and active plan
+- `should_enter_plan_mode` identifies larger requests
+- `draft_plan` creates inspection, edit, and test steps
 - `render_plan` produces readable numbered output
-- `python -m claudecode.planning "add a CLI command"` prints a plan
-- you can explain why planning comes before editing
+- `enter_plan_mode` stores the plan and switches modes
+- `exit_plan_mode` clears the plan and returns to normal mode
+- `python -m claudecode.plan_mode "refactor the CLI"` prints a plan draft
+- you can explain when explicit planning should and should not be used
 
 Stop there.
 
@@ -584,15 +576,15 @@ Use this format:
 ```text
 Week 03 Submission
 
-My planner in one sentence:
+My plan mode in one sentence:
 
 Example request:
 
-First inspection target:
+Why this request should or should not enter plan mode:
 
-Planned edit step:
+First planned inspection:
 
-Planned test step:
+Exit behavior:
 
 How this connects to Week 01 and Week 02:
 
