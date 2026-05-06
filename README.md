@@ -21,12 +21,16 @@ build the project from scratch. No external repo is required.
 - `02_repo_mapping.md`
 - `03_planning.md`
 - `04_editing_patches.md`
-- `05_testing_loops.md`
-- `06_review_and_retry.md`
-- `07_safe_tool_use.md`
-- `08_terminal_workflows.md`
-- `09_end_to_end_build.md`
-- `10_portfolio_packaging.md`
+- `05_permissions.md`
+- `06_bash_commands.md`
+- `07_tool_result_loop.md`
+- `08_testing_loops.md`
+- `09_todo_state.md`
+- `10_search_tools.md`
+- `11_read_file_windows.md`
+- `12_session_transcript.md`
+- `13_compact_context.md`
+- `14_end_to_end_build.md`
 
 ## Structure
 

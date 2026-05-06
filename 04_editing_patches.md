@@ -1,282 +1,217 @@
-# Week 04: Build Safe File Editing
+# Week 04: Safe File Editing
 
-This week teaches the fourth habit of building a Claude Code-style coding
-agent:
+A coding agent becomes dangerous the moment it can write files.
 
-```text
-edits should be small, explicit, and reviewable
-```
-
-Week 01 built the turn loop:
+So this week is about one rule:
 
 ```text
-prompt -> model decision -> validation -> result -> transcript
+the model may request an edit, but the runtime owns the write
 ```
 
-Week 02 added repo context:
+We will build two file tools:
 
-```text
-repo path -> repo map -> model context -> better model decision
-```
+- `edit_file`: replace text inside an existing file
+- `write_file`: create or overwrite a whole file
 
-Week 03 added plan mode:
+Use `edit_file` for small targeted changes. Use `write_file` when the whole file
+is new or the replacement would be massive.
 
-```text
-normal mode -> enter plan mode -> draft plan -> exit plan mode
-```
+## Step 1: Define The Edit Tool Input
 
-Week 04 adds controlled file editing:
-
-```text
-read file -> propose replacement -> validate patch -> apply patch -> show diff
-```
-
-The important lesson is that the model can request an edit, but the runtime owns
-the filesystem. The runtime decides what paths are allowed, whether the old text
-matches, how the file changes, and what diff gets shown.
-
-Work through this file from top to bottom. Every task appears inside the lesson
-at the moment you need it.
-
-## Step 1: Understand The Job Of Week 04
-
-A weak coding agent treats editing like this:
-
-```text
-model says "change app.py"
-runtime overwrites app.py
-```
-
-That is dangerous.
-
-A safer coding agent treats editing like this:
-
-```text
-1. read the file
-2. require an exact old-text match
-3. replace only that matched text
-4. show the diff
-5. record the edit in the transcript
-```
-
-This week, we build that safer shape.
-
-The Week 04 rule is:
-
-```text
-never edit a file unless the runtime can explain exactly what changed
-```
-
-## Step 2: Define The Edit Request
-
-Start with a structured edit request.
+Start with the same shape used by many coding-agent file editors:
 
 ```python
 from dataclasses import dataclass
 from pathlib import Path
 ```
 
-Now define the model's requested edit:
-
 ```python
 @dataclass(frozen=True)
 class FileEdit:
     path: str
-    old_text: str
-    new_text: str
+    old_string: str
+    new_string: str
+    replace_all: bool = False
 ```
 
-Read the fields as:
+Read it as:
 
 ```text
 path:
-    the repo-relative file path to edit
+    repo-relative file path
 
-old_text:
-    the exact text expected to already exist
+old_string:
+    exact text to find
 
-new_text:
-    the replacement text
+new_string:
+    replacement text
+
+replace_all:
+    false means targeted edit
+    true means replace every occurrence
 ```
 
-Why require `old_text`?
+The important idea:
 
 ```text
-because the runtime should not guess where the edit belongs
+edit_file does not say "change line 42"
+edit_file says "find this exact text and replace it"
 ```
 
-If `old_text` is not found exactly once, the runtime should stop.
+Line numbers drift. Exact strings prove the model is editing text that actually
+exists.
 
-## Step 3: Define The Edit Result
+## Step 2: Define Whole-File Write Input
 
-The runtime should return structured output.
+Large replacements should not be squeezed into `old_string`.
+
+For those, use a separate full-file write request:
 
 ```python
 @dataclass(frozen=True)
-class EditResult:
+class FileWrite:
+    path: str
+    content: str
+```
+
+Use this when:
+
+- creating a new file
+- replacing almost the entire file
+- generating a small complete module from scratch
+
+The split is simple:
+
+```text
+edit_file:
+    patch one known area
+
+write_file:
+    replace the whole file content
+```
+
+## Step 3: Return A Reviewable Result
+
+Both tools should return the same result shape.
+
+```python
+@dataclass(frozen=True)
+class FileResult:
     path: str
     changed: bool
     message: str
     diff: str
 ```
 
-Read the fields as:
-
-```text
-path:
-    which file was targeted
-
-changed:
-    whether the file actually changed
-
-message:
-    human-readable status
-
-diff:
-    reviewable before/after output
-```
-
-This is a pattern from the earlier weeks:
-
-```text
-model returns intent
-runtime returns result
-```
-
-The model asks. The runtime reports.
+The runtime should never silently write. It should always be able to show what
+changed.
 
 ## Step 4: Keep Paths Inside The Repo
 
-Before editing, resolve the path safely.
+Never trust a path from the model.
 
 ```python
 def resolve_repo_path(repo_root: Path, relative_path: str) -> Path:
     root = repo_root.resolve()
     target = (root / relative_path).resolve()
-```
 
-Break it down:
-
-```text
-repo_root.resolve():
-    turns the repo root into an absolute path
-
-(root / relative_path).resolve():
-    combines the repo root and requested path, then normalizes it
-```
-
-Now block paths outside the repo:
-
-```python
-    if root not in target.parents and target != root:
+    if target != root and root not in target.parents:
         raise ValueError(f"path escapes repo: {relative_path}")
 
     return target
 ```
 
-Why this matters:
+This blocks paths like:
 
 ```text
-../../../secret.txt should not be editable from inside the repo
+../../private-notes.txt
 ```
 
-This is the first editing safety rail.
+The model can ask. The runtime can refuse.
 
-## Step 5: Read The Current File
+## Step 5: Read Text Files Only
 
-Editing starts by reading.
+Keep the first version narrow.
 
 ```python
 def read_text_file(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 ```
 
-This tiny helper is boring on purpose.
+For now, assume normal UTF-8 source files.
 
-It makes later code read like a workflow:
+Later you can add binary detection, file-size limits, generated-file deny lists,
+and permission prompts. Do not add those yet.
 
-```text
-resolve path
-read file
-validate old text
-write file
-show diff
-```
+## Step 6: Validate An Edit
 
-For Week 04, assume UTF-8 text files. Binary files, huge files, and generated
-files can be handled later.
-
-## Step 6: Validate The Old Text
-
-The edit should only apply if `old_text` appears exactly once.
-
-```python
-def count_matches(text: str, needle: str) -> int:
-    if not needle:
-        return 0
-    return text.count(needle)
-```
-
-Why reject empty `old_text`?
-
-```text
-empty text matches everywhere
-```
-
-Now use it before editing:
+First reject edits that cannot be meaningful.
 
 ```python
 def validate_edit(current_text: str, edit: FileEdit) -> str | None:
-    matches = count_matches(current_text, edit.old_text)
+    if not edit.old_string:
+        return "old_string must not be empty"
+
+    if edit.old_string == edit.new_string:
+        return "old_string and new_string must differ"
+```
+
+Now count matches:
+
+```python
+    matches = current_text.count(edit.old_string)
 
     if matches == 0:
-        return "old_text was not found"
+        return "old_string was not found"
+```
 
-    if matches > 1:
-        return "old_text matched more than once"
+Here is the safety choice for this course:
+
+```python
+    if matches > 1 and not edit.replace_all:
+        return "old_string matched more than once; use replace_all=True or provide more context"
 
     return None
 ```
 
-This is the second editing safety rail:
+Some agents replace only the first match by default. For learning, this course is
+stricter: if the text appears multiple times, make the model provide a more
+specific `old_string` or explicitly choose `replace_all=True`.
 
-```text
-the model must identify the exact text it wants to replace
-```
+That makes mistakes easier to see.
 
-## Step 7: Build The New File Text
+## Step 7: Apply The Replacement
 
-Once validation passes, replacement is simple:
+Now the edit behavior is tiny.
 
 ```python
 def apply_replacement(current_text: str, edit: FileEdit) -> str:
-    return current_text.replace(edit.old_text, edit.new_text, 1)
+    if edit.replace_all:
+        return current_text.replace(edit.old_string, edit.new_string)
+
+    return current_text.replace(edit.old_string, edit.new_string, 1)
 ```
 
-The `1` matters.
+Read it as:
 
 ```text
-without 1:
-    every matching occurrence would be replaced
+replace_all=True:
+    change every occurrence
 
-with 1:
-    only the intended match changes
+replace_all=False:
+    change one occurrence
 ```
 
-Because `validate_edit` already required exactly one match, this is now safe and
-easy to reason about.
+Because validation already rejected repeated matches in single-edit mode, the
+final `replace(..., 1)` changes exactly one place.
 
-## Step 8: Create A Diff
+## Step 8: Build A Diff
 
-The user should see what changed.
-
-Use Python's standard library:
+Use the standard library.
 
 ```python
 import difflib
 ```
-
-Now create a small unified diff:
 
 ```python
 def make_diff(path: str, before: str, after: str) -> str:
@@ -293,124 +228,185 @@ def make_diff(path: str, before: str, after: str) -> str:
     )
 ```
 
-Break down the important pieces:
+This gives the user reviewable evidence:
 
 ```text
-splitlines(keepends=True):
-    keeps newline characters so the diff is accurate
-
-unified_diff:
-    creates the familiar patch-style output
-
-fromfile / tofile:
-    labels the before and after versions
+- old line
++ new line
 ```
 
-This is the third editing safety rail:
+The runtime should generate the diff before it writes.
 
-```text
-every write should produce reviewable evidence
-```
+## Step 9: Implement `edit_file`
 
-## Step 9: Apply One File Edit
-
-Now combine the pieces.
+The edit tool gets a `write` flag so you can preview first.
 
 ```python
-def apply_file_edit(repo_root: str | Path, edit: FileEdit) -> EditResult:
+def edit_file(
+    repo_root: str | Path,
+    edit: FileEdit,
+    *,
+    write: bool,
+) -> FileResult:
+```
+
+Resolve and read:
+
+```python
     root = Path(repo_root)
     path = resolve_repo_path(root, edit.path)
-```
-
-First, resolve the path safely.
-
-Then read the file:
-
-```python
     current_text = read_text_file(path)
 ```
 
-Validate the edit:
+Validate before changing anything:
 
 ```python
     error = validate_edit(current_text, edit)
     if error:
-        return EditResult(
-            path=edit.path,
-            changed=False,
-            message=error,
-            diff="",
-        )
+        return FileResult(edit.path, False, error, "")
 ```
 
-If validation fails, return without writing.
-
-Now build the replacement and diff:
+Build the proposed file:
 
 ```python
     new_text = apply_replacement(current_text, edit)
     diff = make_diff(edit.path, current_text, new_text)
 ```
 
-Finally, write and report:
+Preview mode stops here:
+
+```python
+    if not write:
+        return FileResult(edit.path, False, "edit previewed", diff)
+```
+
+Write only after the diff exists:
 
 ```python
     path.write_text(new_text, encoding="utf-8")
-    return EditResult(
-        path=edit.path,
-        changed=True,
-        message="edit applied",
-        diff=diff,
-    )
+    return FileResult(edit.path, True, "edit applied", diff)
 ```
 
-This function is the Week 04 product:
+The flow is:
 
 ```text
-FileEdit -> validation -> file write -> EditResult
+read -> validate -> build diff -> optionally write
 ```
 
-## Step 10: Connect Editing To Tool Calls
+## Step 10: Implement `write_file`
 
-In Week 01, the model could request a tool call:
+Whole-file writes use the same safety shape.
 
 ```python
-ToolCall(
-    name="edit_file",
-    arguments={
-        "path": "README.md",
-        "old_text": "old line",
-        "new_text": "new line",
+def write_file(
+    repo_root: str | Path,
+    file_write: FileWrite,
+    *,
+    write: bool,
+) -> FileResult:
+```
+
+Resolve the path and read the old content if the file exists:
+
+```python
+    root = Path(repo_root)
+    path = resolve_repo_path(root, file_write.path)
+    old_text = path.read_text(encoding="utf-8") if path.exists() else ""
+```
+
+Create the diff:
+
+```python
+    diff = make_diff(file_write.path, old_text, file_write.content)
+```
+
+Preview mode:
+
+```python
+    if not write:
+        return FileResult(file_write.path, False, "write previewed", diff)
+```
+
+Write the full file:
+
+```python
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(file_write.content, encoding="utf-8")
+    return FileResult(file_write.path, True, "file written", diff)
+```
+
+Notice the difference:
+
+```text
+edit_file needs old_string
+write_file needs complete content
+```
+
+## Step 11: Connect Tool Calls To Runtime Functions
+
+The model-facing specs can be simple.
+
+```python
+EDIT_FILE_TOOL = {
+    "name": "edit_file",
+    "description": "Replace exact text in an existing repo file.",
+    "parameters": {
+        "path": "Repo-relative path.",
+        "old_string": "Exact text to replace.",
+        "new_string": "Replacement text.",
+        "replace_all": "Whether to replace every occurrence.",
     },
-)
+}
 ```
 
-Week 04 teaches what the runtime should do with that request:
+```python
+WRITE_FILE_TOOL = {
+    "name": "write_file",
+    "description": "Create or overwrite a text file.",
+    "parameters": {
+        "path": "Repo-relative path.",
+        "content": "Complete file content.",
+    },
+}
+```
+
+The runtime still owns conversion and validation.
 
 ```python
-def edit_from_tool_call(repo_root: str | Path, arguments: dict[str, str]) -> EditResult:
+def edit_from_tool_call(
+    repo_root: str | Path,
+    arguments: dict,
+    *,
+    write: bool,
+) -> FileResult:
     edit = FileEdit(
         path=arguments["path"],
-        old_text=arguments["old_text"],
-        new_text=arguments["new_text"],
+        old_string=arguments["old_string"],
+        new_string=arguments["new_string"],
+        replace_all=arguments.get("replace_all", False),
     )
-    return apply_file_edit(repo_root, edit)
+    return edit_file(repo_root, edit, write=write)
 ```
 
-This is the bridge:
-
-```text
-model asks for edit_file
-runtime validates arguments
-runtime applies one exact replacement
-runtime returns a diff
+```python
+def write_from_tool_call(
+    repo_root: str | Path,
+    arguments: dict,
+    *,
+    write: bool,
+) -> FileResult:
+    file_write = FileWrite(
+        path=arguments["path"],
+        content=arguments["content"],
+    )
+    return write_file(repo_root, file_write, write=write)
 ```
 
-Later, permissions decide whether `edit_file` is allowed in the current mode.
+The model chooses the tool. The runtime decides whether the write is allowed.
 
-## Step 11: Add A Tiny CLI
+## Step 12: Add A Tiny CLI
 
-Give the edit tool a command-line demo:
+Use the CLI to practice the edit primitive.
 
 ```python
 def main() -> int:
@@ -418,82 +414,82 @@ def main() -> int:
 
     parser = argparse.ArgumentParser()
     parser.add_argument("path")
-    parser.add_argument("old_text")
-    parser.add_argument("new_text")
+    parser.add_argument("old_string")
+    parser.add_argument("new_string")
     parser.add_argument("--repo", default=".")
+    parser.add_argument("--replace-all", action="store_true")
+    parser.add_argument("--write", action="store_true")
     args = parser.parse_args()
 
-    result = apply_file_edit(
+    result = edit_file(
         args.repo,
         FileEdit(
             path=args.path,
-            old_text=args.old_text,
-            new_text=args.new_text,
+            old_string=args.old_string,
+            new_string=args.new_string,
+            replace_all=args.replace_all,
         ),
+        write=args.write,
     )
+
     print(result.message)
     if result.diff:
         print(result.diff)
-    return 0 if result.changed else 1
+
+    return 0 if result.diff or result.changed else 1
 ```
 
-Finish the module:
+Finish the file:
 
 ```python
 if __name__ == "__main__":
     raise SystemExit(main())
 ```
 
-Now the learner can run a tiny replacement:
+Preview:
 
 ```bash
 python -m claudecode.file_edit README.md "old text" "new text"
 ```
 
-This is a teaching CLI. In the real agent loop, the model requests `edit_file`
-and the runtime calls `apply_file_edit`.
+Apply:
 
-## Step 12: The Week 04 Build
+```bash
+python -m claudecode.file_edit README.md "old text" "new text" --write
+```
 
-Your build this week is one small file:
+Replace every match:
+
+```bash
+python -m claudecode.file_edit README.md "old text" "new text" --replace-all --write
+```
+
+## Step 13: Test The Important Behavior
+
+Create:
 
 ```text
 claudecode/file_edit.py
 ```
 
-It should contain:
-
-```text
-FileEdit
-EditResult
-resolve_repo_path
-read_text_file
-count_matches
-validate_edit
-apply_replacement
-make_diff
-apply_file_edit
-edit_from_tool_call
-main
-```
-
-Optional tiny smoke test:
+Add a successful targeted edit test:
 
 ```python
-from claudecode.file_edit import FileEdit, apply_file_edit
+from claudecode.file_edit import FileEdit, FileWrite, edit_file, write_file
 
 
-def test_apply_file_edit_changes_one_match(tmp_path):
+def test_edit_file_changes_one_exact_match(tmp_path):
     target = tmp_path / "README.md"
     target.write_text("hello world\n", encoding="utf-8")
 
-    result = apply_file_edit(
+    result = edit_file(
         tmp_path,
         FileEdit(
             path="README.md",
-            old_text="hello",
-            new_text="hi",
+            old_string="hello",
+            new_string="hi",
         ),
+        write=True,
     )
 
     assert result.changed is True
@@ -502,49 +498,77 @@ def test_apply_file_edit_changes_one_match(tmp_path):
     assert "+hi world" in result.diff
 ```
 
-Add a failure test too:
+Add a repeated-match rejection test:
 
 ```python
-def test_apply_file_edit_rejects_missing_old_text(tmp_path):
+def test_edit_file_rejects_repeated_match_without_replace_all(tmp_path):
     target = tmp_path / "README.md"
-    target.write_text("hello world\n", encoding="utf-8")
+    target.write_text("alpha\nbeta\nalpha\n", encoding="utf-8")
 
-    result = apply_file_edit(
+    result = edit_file(
         tmp_path,
         FileEdit(
             path="README.md",
-            old_text="missing",
-            new_text="replacement",
+            old_string="alpha",
+            new_string="omega",
         ),
+        write=True,
     )
 
     assert result.changed is False
-    assert "not found" in result.message
-    assert target.read_text(encoding="utf-8") == "hello world\n"
+    assert "more than once" in result.message
+    assert target.read_text(encoding="utf-8") == "alpha\nbeta\nalpha\n"
 ```
 
-These tests prove the two important behaviors:
+Add a `replace_all` test:
 
-```text
-valid exact edits apply
-invalid edits do not write
+```python
+def test_edit_file_replace_all_changes_every_match(tmp_path):
+    target = tmp_path / "README.md"
+    target.write_text("alpha\nbeta\nalpha\n", encoding="utf-8")
+
+    result = edit_file(
+        tmp_path,
+        FileEdit(
+            path="README.md",
+            old_string="alpha",
+            new_string="omega",
+            replace_all=True,
+        ),
+        write=True,
+    )
+
+    assert result.changed is True
+    assert target.read_text(encoding="utf-8") == "omega\nbeta\nomega\n"
 ```
 
-## Step 13: Done Checklist
+Add a whole-file write test:
 
-You are done when:
+```python
+def test_write_file_replaces_whole_file(tmp_path):
+    target = tmp_path / "README.md"
+    target.write_text("old file\n", encoding="utf-8")
 
-- file paths are resolved inside the repo
-- empty `old_text` is rejected
-- missing `old_text` does not write
-- repeated `old_text` does not write
-- a valid edit changes exactly one match
-- every successful edit returns a diff
-- `edit_from_tool_call` converts tool arguments into a `FileEdit`
-- `python -m claudecode.file_edit ...` can run a tiny demo edit
-- you can explain why the runtime, not the model, owns file writes
+    result = write_file(
+        tmp_path,
+        FileWrite(path="README.md", content="new file\n"),
+        write=True,
+    )
 
-Stop there.
+    assert result.changed is True
+    assert target.read_text(encoding="utf-8") == "new file\n"
+    assert "-old file" in result.diff
+    assert "+new file" in result.diff
+```
+
+Stop when these behaviors are true:
+
+- `edit_file` replaces exact text
+- repeated text is rejected unless `replace_all=True`
+- `replace_all=True` changes every match
+- `write_file` replaces the whole file
+- both tools can preview with a diff before writing
+- paths cannot escape the repo
 
 ## Skool Submission
 
@@ -553,15 +577,13 @@ Use this format:
 ```text
 Week 04 Submission
 
-My safe edit tool in one sentence:
+My safe file tools in one sentence:
 
-Successful edit example:
+Targeted edit example:
 
-Rejected edit example:
+Replace-all example:
 
-What the diff showed:
+Whole-file write example:
 
-Why exact old_text matters:
-
-One thing I want reviewed:
+Why edit_file and write_file are separate tools:
 ```
