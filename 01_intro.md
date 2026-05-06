@@ -3,11 +3,11 @@
 This week teaches the first habit of building a Claude Code-style coding agent:
 
 ```text
-a coding agent is a stateful loop, not just a chatbot response
+the model chooses tools, the runtime controls what actually happens
 ```
 
-You will build the smallest useful mental model of a coding agent turn. No file
-editing yet. No shell execution yet. The goal is to understand the loop that all
+You will build the smallest useful mental model of a coding agent turn. No real
+LLM API yet. No file editing yet. The goal is to understand the loop that all
 later features plug into.
 
 Work through this file from top to bottom. Every task appears inside the lesson
@@ -15,48 +15,57 @@ at the moment you need it.
 
 ## Step 1: Understand The Job Of Week 01
 
-A normal chatbot can answer a question from text. A coding agent has to keep
-track of more state:
+A Claude Code-style agent is not a keyword router.
+
+In the real architecture, the runtime gives the model:
 
 ```text
-1. what the user asked for
-2. what repo context is available
-3. which tools might be useful
-4. what happened during this turn
-5. why the turn stopped
-6. what should be remembered next time
+1. the user's prompt
+2. the available tool names
+3. the available tool descriptions
+4. the tool argument schemas
+5. relevant repo context
+6. prior transcript entries
 ```
 
-This week, we build the first version of that shape:
+Then the model decides whether to answer directly or request a tool call.
+
+The runtime still stays in charge:
 
 ```text
-prompt -> route -> turn result -> transcript
+prompt -> model decision -> validate tool call -> result -> transcript
 ```
 
-That is the core loop. Everything else in the course makes this loop more real.
+This week, we fake the model decision so we can build the runtime loop first.
+Later, the fake model gets replaced with a real LLM tool-calling API.
 
 ## Step 2: Learn The Five Objects
 
 The first version of the agent needs five objects:
 
 ```text
-Prompt:
-    the user's request
+ToolSpec:
+    the name and description shown to the model
 
-Tool:
-    a named capability the agent may use later
+ToolCall:
+    the specific tool and arguments requested by the model
 
-Route:
-    the agent's guess about which tools matter
+ModelDecision:
+    the model's answer, with or without a tool call
 
 TurnResult:
-    the result of one agent turn
+    the runtime's final result for one turn
 
 Transcript:
     the memory trail across turns
 ```
 
-Keep them small. Good coding-agent systems start boring and explicit.
+This is the right separation:
+
+```text
+the model proposes
+the runtime validates, executes, and records
+```
 
 ## Step 3: Write The Smallest Data Model
 
@@ -67,22 +76,28 @@ from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
-class Tool:
+class ToolSpec:
     name: str
     description: str
 
 
 @dataclass(frozen=True)
-class Route:
-    prompt: str
-    matched_tools: tuple[str, ...]
+class ToolCall:
+    name: str
+    arguments: dict[str, str]
+
+
+@dataclass(frozen=True)
+class ModelDecision:
+    message: str
+    tool_call: ToolCall | None = None
 
 
 @dataclass(frozen=True)
 class TurnResult:
     prompt: str
     message: str
-    matched_tools: tuple[str, ...]
+    tool_call: ToolCall | None
     stop_reason: str
 
 
@@ -90,8 +105,8 @@ class TurnResult:
 class Transcript:
     entries: list[str] = field(default_factory=list)
 
-    def append(self, text: str) -> None:
-        self.entries.append(text)
+    def append(self, role: str, text: str) -> None:
+        self.entries.append(f"{role}: {text}")
 
     def replay(self) -> tuple[str, ...]:
         return tuple(self.entries)
@@ -100,82 +115,134 @@ class Transcript:
 Read this as the first version of memory:
 
 ```text
-each turn can append what happened
-later turns can replay the previous entries
+each turn can append user and agent messages
+later turns can replay what already happened
 ```
 
-That tiny transcript will become important once the agent edits files, runs
-tests, and needs to explain what it already tried.
+That tiny transcript will matter once the agent edits files, runs tests, and
+needs to explain what it already tried.
 
-## Step 4: Add A Tiny Tool Inventory
+## Step 4: Add Tool Specs
 
-A Claude Code-style agent has a tool surface. The first version can be only
-metadata:
+Tool specs are what the model sees.
+
+Start with metadata only:
 
 ```python
 TOOLS = (
-    Tool(
+    ToolSpec(
         name="read_file",
-        description="Read a file before deciding what to change.",
+        description="Read a file from the repo before deciding what to change.",
     ),
-    Tool(
+    ToolSpec(
         name="edit_file",
-        description="Apply a small, reviewable code edit.",
+        description="Apply a small, reviewable edit to a repo file.",
     ),
-    Tool(
+    ToolSpec(
         name="run_tests",
-        description="Run the project test command and report the result.",
+        description="Run the project test command and summarize the result.",
     ),
 )
 ```
 
-These tools do not execute yet. Week 01 only teaches selection.
+These tools do not execute yet. Week 01 teaches the tool-calling shape.
+
+The useful question is not:
+
+```text
+Which keyword did the prompt contain?
+```
 
 The useful question is:
 
 ```text
-Given this prompt, which tools sound relevant?
+Given the prompt and tool specs, what action does the model request?
 ```
 
-That question is routing.
+## Step 5: Mock The Model Decision
 
-## Step 5: Build A Naive Router
+In production, an LLM chooses from the tool specs.
 
-The first router can be simple keyword matching:
+In Week 01, use a mock function with hardcoded examples:
 
 ```python
-def route_prompt(prompt: str, tools: tuple[Tool, ...] = TOOLS) -> Route:
-    lowered = prompt.lower()
-    matches: list[str] = []
+def mock_model_decide_next_action(
+    prompt: str,
+    tools: tuple[ToolSpec, ...] = TOOLS,
+) -> ModelDecision:
+    if prompt == "read README.md":
+        return ModelDecision(
+            message="I should inspect the README before explaining the project.",
+            tool_call=ToolCall(
+                name="read_file",
+                arguments={"path": "README.md"},
+            ),
+        )
 
-    if any(word in lowered for word in ("read", "inspect", "open", "look")):
-        matches.append("read_file")
-    if any(word in lowered for word in ("change", "edit", "fix", "add")):
-        matches.append("edit_file")
-    if any(word in lowered for word in ("test", "pytest", "fail", "verify")):
-        matches.append("run_tests")
+    if prompt == "run tests":
+        return ModelDecision(
+            message="I should run the test suite before reporting status.",
+            tool_call=ToolCall(
+                name="run_tests",
+                arguments={"command": "pytest"},
+            ),
+        )
 
-    return Route(prompt=prompt, matched_tools=tuple(matches))
+    return ModelDecision(
+        message="I can answer directly for this first toy version.",
+        tool_call=None,
+    )
 ```
 
-This is not smart. That is fine.
+This function is intentionally fake. Its job is to stand in for the LLM while
+you build the runtime around it.
 
-The point is to make routing visible:
+The architecture you are learning is:
 
 ```text
-prompt:
-    "fix the failing test"
-
-matched tools:
-    edit_file, run_tests
+model returns structured intent
+runtime decides whether that intent is allowed
 ```
 
-Later, routing can use a model, command registry, permissions, or repo context.
-The first version should be easy to understand.
+## Step 6: Validate Tool Calls
 
-## Step 6: Run One Agent Turn
+The model should not be blindly trusted.
 
-Now wrap the router in a turn loop:
+Add a small validator:
+
+```python
+def validate_tool_call(
+    tool_call: ToolCall | None,
+    tools: tuple[ToolSpec, ...] = TOOLS,
+) -> str | None:
+    if tool_call is None:
+        return None
+
+    allowed_names = {tool.name for tool in tools}
+    if tool_call.name not in allowed_names:
+        return f"unknown tool: {tool_call.name}"
+
+    if tool_call.name == "read_file" and "path" not in tool_call.arguments:
+        return "read_file requires a path"
+
+    if tool_call.name == "run_tests" and "command" not in tool_call.arguments:
+        return "run_tests requires a command"
+
+    return None
+```
+
+This is a key coding-agent rule:
+
+```text
+the model can request a tool, but the runtime decides whether the call is valid
+```
+
+Later, validation will include permissions, sandbox rules, path checks, and
+human approval.
+
+## Step 7: Run One Agent Turn
+
+Now wrap the model decision and validation in a turn loop:
 
 ```python
 class CodingAgent:
@@ -183,62 +250,75 @@ class CodingAgent:
         self.transcript = Transcript()
 
     def run_turn(self, prompt: str) -> TurnResult:
-        route = route_prompt(prompt)
-        if route.matched_tools:
-            tool_text = ", ".join(route.matched_tools)
-            message = f"I would start with: {tool_text}"
-        else:
-            message = "I need more repo context before choosing a tool."
+        self.transcript.append("user", prompt)
+        decision = mock_model_decide_next_action(prompt)
+        error = validate_tool_call(decision.tool_call)
 
-        result = TurnResult(
+        if error:
+            message = f"Blocked invalid tool call: {error}"
+            stop_reason = "blocked"
+            tool_call = decision.tool_call
+        elif decision.tool_call:
+            message = f"Model requested tool: {decision.tool_call.name}"
+            stop_reason = "tool_requested"
+            tool_call = decision.tool_call
+        else:
+            message = decision.message
+            stop_reason = "completed"
+            tool_call = None
+
+        self.transcript.append("agent", message)
+        return TurnResult(
             prompt=prompt,
             message=message,
-            matched_tools=route.matched_tools,
-            stop_reason="completed",
+            tool_call=tool_call,
+            stop_reason=stop_reason,
         )
-        self.transcript.append(f"user: {prompt}")
-        self.transcript.append(f"agent: {message}")
-        return result
 ```
 
 This is the first real agent shape:
 
 ```text
 receive prompt
-route prompt
-create result
+ask model for next action
+validate model decision
+record result
 write transcript
-return result
+return turn result
 ```
 
-No magic. Just state moving through a loop.
+No file has been read yet. No shell command has run yet. That is good. The
+runtime skeleton should exist before tools do real work.
 
-## Step 7: Try Three Prompts
+## Step 8: Try Three Prompts
 
 Use the same agent for multiple turns:
 
 ```python
 agent = CodingAgent()
 
-print(agent.run_turn("read the README and explain the project"))
-print(agent.run_turn("add a repo map command"))
-print(agent.run_turn("run tests after the change"))
+print(agent.run_turn("read README.md"))
+print(agent.run_turn("run tests"))
+print(agent.run_turn("explain what you can do"))
 print(agent.transcript.replay())
 ```
 
 Expected behavior:
 
 ```text
-"read the README..." matches read_file
-"add a repo map command" matches edit_file
-"run tests..." matches run_tests
+"read README.md" requests read_file with {"path": "README.md"}
+"run tests" requests run_tests with {"command": "pytest"}
+"explain what you can do" answers directly
 transcript contains all three user turns and agent messages
 ```
 
-This is still a toy. But the toy already teaches the core idea: the agent is
-not just one answer. It is a stateful workflow.
+This is still a toy. But it teaches the right mental model:
 
-## Step 8: Understand Stop Reasons
+```text
+tools are selected by model decision, not by keyword routing in the runtime
+```
+
+## Step 9: Understand Stop Reasons
 
 Every turn should say why it stopped.
 
@@ -246,34 +326,22 @@ For now, use:
 
 ```text
 completed:
-    the turn finished normally
+    the model answered without asking for a tool
 
-needs_context:
-    the agent cannot choose a next action yet
+tool_requested:
+    the model requested a valid tool call
 
 blocked:
-    the agent knows what to do but is not allowed to do it
+    the model requested an invalid or disallowed tool call
 
 error:
     something failed while running the turn
 ```
 
-Update the no-match branch like this:
-
-```python
-if route.matched_tools:
-    tool_text = ", ".join(route.matched_tools)
-    stop_reason = "completed"
-    message = f"I would start with: {tool_text}"
-else:
-    stop_reason = "needs_context"
-    message = "I need more repo context before choosing a tool."
-```
-
 Stop reasons make the agent debuggable. Later, they decide whether the loop
-continues, asks for permission, runs tests, or reports a failure.
+executes a tool, asks for permission, runs tests, or reports a failure.
 
-## Step 9: The Week 01 Build
+## Step 10: The Week 01 Build
 
 Your build this week is one small file:
 
@@ -284,28 +352,32 @@ claudecode/agent.py
 It should contain:
 
 ```text
-Tool
-Route
+ToolSpec
+ToolCall
+ModelDecision
 TurnResult
 Transcript
 TOOLS
-route_prompt
+mock_model_decide_next_action
+validate_tool_call
 CodingAgent
 ```
 
 Keep the implementation short. The goal is not completeness. The goal is to
-make the turn loop concrete.
+make the model-decision loop concrete.
 
-## Step 10: Done Checklist
+## Step 11: Done Checklist
 
 You are done when:
 
 - `CodingAgent.run_turn` accepts a prompt
-- the prompt is routed to zero or more tool names
+- the mock model can return a direct answer
+- the mock model can return a `ToolCall`
+- the runtime validates the requested tool name
 - the turn returns a `TurnResult`
 - the turn appends user and agent entries to the transcript
 - the result includes a `stop_reason`
-- you can explain the loop as `prompt -> route -> result -> transcript`
+- you can explain the loop as `prompt -> model decision -> validation -> result -> transcript`
 
 Stop there.
 
@@ -322,7 +394,9 @@ The objects I built:
 
 Example prompt:
 
-Matched tools:
+Model decision:
+
+Runtime validation:
 
 What the transcript stores:
 
