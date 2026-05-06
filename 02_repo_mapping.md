@@ -1,415 +1,410 @@
-# Week 02: Repo Mapping Before Editing
+# Week 02: Build A Repo Mapper Before Editing
 
 This week teaches the second habit of building a Claude Code-style coding
 agent:
 
 ```text
-map the repo before you change the repo
+the agent should map the repo before it plans a change
 ```
 
-You will not edit files yet. You will inspect the reference checkout, generate a
-workspace manifest, identify the main source roots, and write a repo map that a
-coding agent could use before planning a change.
+You will build a tiny repo mapper. It will count files, identify important
+directories, guess likely entrypoints, and produce a short markdown summary.
+No file editing yet.
 
 Work through this file from top to bottom. Every task appears inside the lesson
 at the moment you need it.
 
 ## Step 1: Understand The Job Of Week 02
 
-The goal this week is not to memorize every file. The goal is to build a useful
-first map of an unfamiliar codebase.
-
-The workflow is:
+Week 01 built the turn loop:
 
 ```text
-1. identify the repo roots
-2. count the important files
-3. name the main modules
-4. connect modules to responsibilities
-5. find tests and assets
-6. write a short repo map before editing
+prompt -> route -> result -> transcript
 ```
 
-For Week 02, the trusted reference is still:
+Week 02 adds repo context:
 
 ```text
-reference/claw-code/
+repo path -> file scan -> repo map -> agent turn
 ```
 
-You are using the reference to learn what a real coding-agent project has to
-notice before it starts changing code.
-
-## Step 2: Learn The Repo Mapping Mental Model
-
-A coding agent should not treat a repo as a flat pile of files.
-
-It should build a map:
+A coding agent should not start with:
 
 ```text
-entrypoint:
-    where the program starts
-
-runtime:
-    how a request moves through the system
-
-state:
-    where sessions, transcripts, history, or config live
-
-tools:
-    where external actions are defined
-
-tests:
-    how the repo proves behavior still works
-
-docs:
-    where humans explain the system
+I will edit some file that sounds relevant.
 ```
 
-The first useful repo-mapping question is:
+It should start with:
 
 ```text
-If I had to change this behavior, where would I look first?
+I know the repo roots, likely entrypoints, test locations, and current file map.
 ```
 
-A good map does not answer every future question. It helps you start in the
-right neighborhood.
+That is what this lesson builds.
 
-## Step 3: Learn The Words Root, Entrypoint, Module, Surface, And Test
+## Step 2: Learn The Repo Map Shape
 
-Coding-agent repo inspection uses these words constantly:
-
-- **root** means a top-level directory with a clear job
-- **entrypoint** means the file or command where execution begins
-- **module** means a grouped piece of source code with one responsibility
-- **surface** means the visible commands, tools, APIs, or CLI options
-- **test** means executable proof that behavior still works
-
-For now, keep the model simple:
+A useful repo map is short. It should answer:
 
 ```text
-root:
-    src, tests, assets, docs, reference
-
-entrypoint:
-    the file that receives the command first
-
-module:
-    a source file or folder with a named responsibility
-
-surface:
-    the commands and tools users or agents can call
-
-test:
-    the check you run before trusting a change
+where is the repo?
+what are the top-level directories?
+where does the app likely start?
+where are the tests?
+what files look important?
+what should the agent inspect before editing?
 ```
 
-You are not implementing repo mapping code this week. You are learning what the
-map should contain.
+Use a data model instead of loose strings:
 
-## Step 4: Generate The Reference Manifest
+```python
+from dataclasses import dataclass
+from pathlib import Path
 
-Move into the reference checkout:
+
+@dataclass(frozen=True)
+class RepoMap:
+    root: Path
+    top_level_dirs: tuple[str, ...]
+    top_level_files: tuple[str, ...]
+    entrypoint_candidates: tuple[str, ...]
+    test_candidates: tuple[str, ...]
+    total_files: int
+```
+
+This gives the agent a structured object it can pass into later planning code.
+
+## Step 3: Walk The Repo Safely
+
+Start with a small scanner:
+
+```python
+IGNORE_DIRS = {
+    ".git",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+    "dist",
+    "build",
+}
+
+
+def iter_repo_files(root: Path) -> list[Path]:
+    files: list[Path] = []
+    for path in root.rglob("*"):
+        if any(part in IGNORE_DIRS for part in path.parts):
+            continue
+        if path.is_file():
+            files.append(path)
+    return files
+```
+
+The ignore list matters. A coding agent should avoid wasting context on build
+artifacts, dependency folders, caches, and git internals.
+
+This is the first repo-mapping rule:
+
+```text
+scan source, not noise
+```
+
+## Step 4: Identify Top-Level Shape
+
+Now collect top-level files and directories:
+
+```python
+def top_level_shape(root: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    dirs: list[str] = []
+    files: list[str] = []
+
+    for child in sorted(root.iterdir()):
+        if child.name in IGNORE_DIRS:
+            continue
+        if child.is_dir():
+            dirs.append(child.name)
+        elif child.is_file():
+            files.append(child.name)
+
+    return tuple(dirs), tuple(files)
+```
+
+Read this like a first glance at the project:
+
+```text
+directories tell you the project zones
+files tell you the project metadata
+```
+
+For example:
+
+```text
+claudecode/
+examples/
+tests/
+README.md
+pyproject.toml
+```
+
+That already tells you this is probably a Python project with package code,
+examples, tests, and install metadata.
+
+## Step 5: Guess Entrypoints
+
+An entrypoint is where execution may begin.
+
+Start with obvious filename patterns:
+
+```python
+ENTRYPOINT_NAMES = {
+    "main.py",
+    "cli.py",
+    "app.py",
+    "__main__.py",
+}
+
+
+def find_entrypoints(root: Path, files: list[Path]) -> tuple[str, ...]:
+    candidates: list[str] = []
+    for path in files:
+        if path.name in ENTRYPOINT_NAMES:
+            candidates.append(str(path.relative_to(root)))
+    return tuple(sorted(candidates))
+```
+
+This is only a guess. Good repo mapping is honest about guesses.
+
+The right wording is:
+
+```text
+entrypoint candidates
+```
+
+not:
+
+```text
+the entrypoint
+```
+
+That small distinction keeps the agent from pretending certainty too early.
+
+## Step 6: Find Tests
+
+Tests are the agent's first safety rail.
+
+Use common patterns:
+
+```python
+def find_tests(root: Path, files: list[Path]) -> tuple[str, ...]:
+    tests: list[str] = []
+    for path in files:
+        relative = path.relative_to(root)
+        parts = relative.parts
+        if "tests" in parts or path.name.startswith("test_"):
+            tests.append(str(relative))
+    return tuple(sorted(tests))
+```
+
+A coding agent should always ask:
+
+```text
+how will I know if my change worked?
+```
+
+Finding tests does not prove the repo is safe to edit. It gives the agent a
+starting point for verification.
+
+## Step 7: Build The Repo Map
+
+Now combine the pieces:
+
+```python
+def build_repo_map(root: str | Path) -> RepoMap:
+    root_path = Path(root).resolve()
+    files = iter_repo_files(root_path)
+    top_dirs, top_files = top_level_shape(root_path)
+
+    return RepoMap(
+        root=root_path,
+        top_level_dirs=top_dirs,
+        top_level_files=top_files,
+        entrypoint_candidates=find_entrypoints(root_path, files),
+        test_candidates=find_tests(root_path, files),
+        total_files=len(files),
+    )
+```
+
+This is the first useful repo context object for your agent.
+
+Later, the turn loop can do this:
+
+```text
+receive prompt
+build repo map
+route prompt with repo context
+choose first files to inspect
+```
+
+Week 02 stops at the repo map.
+
+## Step 8: Render The Map For Humans
+
+Agents need structured data. Humans need readable summaries.
+
+Add a markdown renderer:
+
+```python
+def render_repo_map(repo_map: RepoMap) -> str:
+    lines = [
+        "# Repo Map",
+        "",
+        f"Root: `{repo_map.root}`",
+        f"Total files: {repo_map.total_files}",
+        "",
+        "## Top-Level Directories",
+        *(f"- `{name}`" for name in repo_map.top_level_dirs),
+        "",
+        "## Top-Level Files",
+        *(f"- `{name}`" for name in repo_map.top_level_files),
+        "",
+        "## Entrypoint Candidates",
+        *(f"- `{path}`" for path in repo_map.entrypoint_candidates),
+        "",
+        "## Test Candidates",
+        *(f"- `{path}`" for path in repo_map.test_candidates),
+    ]
+    return "\n".join(lines)
+```
+
+This gives the agent something it can show in a terminal, write to a note, or
+include in a planning step.
+
+## Step 9: Add A Tiny CLI
+
+Give the mapper a command-line entrypoint:
+
+```python
+def main() -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("path", nargs="?", default=".")
+    args = parser.parse_args()
+
+    repo_map = build_repo_map(args.path)
+    print(render_repo_map(repo_map))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+Now the learner can run:
 
 ```bash
-cd reference/claw-code
+python -m claudecode.repo_map .
 ```
 
-Run:
-
-```bash
-python -m src.main manifest
-```
-
-This command uses:
+This is the second course pattern:
 
 ```text
-src/port_manifest.py
+build a small feature
+make it runnable
+make its output readable
 ```
 
-The manifest answers three basic questions:
+## Step 10: Connect Repo Mapping To The Agent Loop
+
+Week 01 routed only from the prompt. Week 02 prepares the next upgrade:
+
+```python
+@dataclass(frozen=True)
+class AgentContext:
+    repo_map: RepoMap
+```
+
+In a later lesson, the agent turn will accept context:
+
+```python
+def run_turn(self, prompt: str, context: AgentContext) -> TurnResult:
+    ...
+```
+
+That is the bridge from chatbot to coding agent:
 
 ```text
-where is the source root?
-how many Python files exist?
-which top-level modules show up?
+the agent responds with knowledge of the repo it is inside
 ```
 
-Read the output as a first pass, not as the final truth. A manifest tells you
-what exists. You still have to decide what matters.
+Do not wire everything together yet. Keep the repo mapper independent and easy
+to test.
 
-## Step 5: Inspect The Manifest Builder
+## Step 11: The Week 02 Build
 
-Open:
+Your build this week is one small file:
 
 ```text
-reference/claw-code/src/port_manifest.py
+claudecode/repo_map.py
 ```
 
-Find `build_port_manifest`.
-
-Trace what it does:
+It should contain:
 
 ```text
-1. chooses a source root
-2. finds Python files under that root
-3. groups files by top-level module or filename
-4. counts how many files belong to each group
-5. attaches short notes for known important files
-6. returns a PortManifest
+RepoMap
+IGNORE_DIRS
+iter_repo_files
+top_level_shape
+find_entrypoints
+find_tests
+build_repo_map
+render_repo_map
+main
 ```
 
-The important idea is that repo mapping starts mechanical:
+Optional tiny smoke test:
 
-```text
-list files
-group files
-count files
-label obvious responsibilities
+```python
+def test_repo_map_finds_tests(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "src" / "main.py").write_text("print('hi')\n")
+    (tmp_path / "tests" / "test_app.py").write_text("def test_ok(): pass\n")
+
+    repo_map = build_repo_map(tmp_path)
+
+    assert "src" in repo_map.top_level_dirs
+    assert "tests/test_app.py" in repo_map.test_candidates
+    assert "src/main.py" in repo_map.entrypoint_candidates
 ```
 
-Then the human or agent adds judgment.
+## Step 12: Done Checklist
 
-## Step 6: Inspect The Workspace Context
+You are done when:
 
-Open:
+- `build_repo_map` accepts a repo path
+- the mapper ignores common noisy directories
+- the map includes top-level directories and files
+- the map includes entrypoint candidates
+- the map includes test candidates
+- `render_repo_map` returns readable markdown
+- `python -m claudecode.repo_map .` prints the map
 
-```text
-reference/claw-code/src/context.py
-```
+Stop there.
 
-Find `build_port_context`.
+## Skool Submission
 
-It names the major roots:
-
-```text
-source_root:
-    reference/claw-code/src
-
-tests_root:
-    reference/claw-code/tests
-
-assets_root:
-    reference/claw-code/assets
-
-archive_root:
-    reference/claw-code/archive/claude_code_ts_snapshot/src
-```
-
-It also counts:
-
-```text
-Python files
-test files
-asset files
-whether the archive exists
-```
-
-This is a different kind of map from the manifest. The manifest lists modules.
-The context names the main repo zones.
-
-## Step 7: Compare Structure And Responsibility
-
-Run:
-
-```bash
-python -m src.main summary
-```
-
-Pick these files from the output:
-
-```text
-src/main.py
-src/runtime.py
-src/query_engine.py
-src/commands.py
-src/tools.py
-src/transcript.py
-src/port_manifest.py
-src/context.py
-```
-
-Write one sentence for each:
-
-```text
-main.py:
-runtime.py:
-query_engine.py:
-commands.py:
-tools.py:
-transcript.py:
-port_manifest.py:
-context.py:
-```
-
-Example:
-
-```text
-main.py: defines the CLI commands that expose the reference workflow.
-```
-
-Do not copy long descriptions. A repo map should be short enough to use while
-working.
-
-## Step 8: Find The Tests Before Editing
-
-From `reference/claw-code`, run:
-
-```bash
-find tests -maxdepth 2 -type f | sort
-```
-
-Then run:
-
-```bash
-python -m unittest discover -s tests -v
-```
-
-If the tests pass, record that. If they fail, record the important failure. A
-coding agent needs to know the existing test situation before it changes code.
-
-Read this as a rule:
-
-```text
-Before editing, find the test command and learn whether the repo starts green.
-```
-
-A failing baseline is not automatically bad. Hiding it is bad.
-
-## Step 9: Create A Change Starting Point
-
-Choose this pretend request:
-
-```text
-Add a command that explains the current session transcript.
-```
-
-Do not implement it.
-
-Use your repo map to answer:
-
-```text
-Where would I inspect first?
-Which files might change?
-Which test area would I check?
-What would be risky to edit without more context?
-```
-
-A good first answer might point to:
-
-```text
-src/main.py:
-    CLI command wiring
-
-src/query_engine.py:
-    session and transcript behavior
-
-src/transcript.py:
-    transcript storage behavior
-
-tests/:
-    baseline checks before and after the change
-```
-
-This is what repo mapping gives you: a starting point without pretending you
-already know the full solution.
-
-## Step 10: Do The Week 02 Task
-
-Your task is to produce one short repo map:
-
-```text
-results/week-02-repo-map.md
-```
-
-Run these commands from `reference/claw-code`:
-
-```bash
-python -m src.main manifest
-python -m src.main summary
-find tests -maxdepth 2 -type f | sort
-python -m unittest discover -s tests -v
-```
-
-Then write the note with this structure:
-
-```markdown
-# Week 02 Repo Map
-
-## Commands I Ran
-
-- `python -m src.main manifest`
-- `python -m src.main summary`
-- `find tests -maxdepth 2 -type f | sort`
-- `python -m unittest discover -s tests -v`
-
-## Repo Zones
-
-- source root:
-- tests root:
-- assets root:
-- reference/archive root:
-
-## Important Files
-
-- `src/main.py`:
-- `src/runtime.py`:
-- `src/query_engine.py`:
-- `src/commands.py`:
-- `src/tools.py`:
-- `src/transcript.py`:
-- `src/port_manifest.py`:
-- `src/context.py`:
-
-## Test Baseline
-
-Record whether tests passed. If they failed, paste the important error.
-
-## Pretend Change Starting Point
-
-Request:
-`Add a command that explains the current session transcript.`
-
-Answer:
-
-- inspect first:
-- likely files:
-- test area:
-- risk:
-
-## My Repo Mapping Mental Model
-
-Write 3-5 sentences in your own words.
-
-## One Thing Still Fuzzy
-
-Write one concept you want to understand better.
-```
-
-Keep it short. If you post in Skool, use this format:
+Use this format:
 
 ```text
 Week 02 Submission
 
-Repo zones:
+My repo mapper in one sentence:
 
-Important files:
+Top-level dirs it found:
 
-Test baseline:
+Entrypoint candidates:
 
-Where I would start for the pretend change:
+Test candidates:
 
 One thing I want reviewed:
 ```
-
-## Done Checklist
-
-You are done when:
-
-- `python -m src.main manifest` ran, or you recorded the error
-- `python -m src.main summary` ran, or you recorded the error
-- you found the test files, or you recorded why you could not
-- `python -m unittest discover -s tests -v` ran, or you recorded the error
-- your repo map names the main roots and important files in plain language
-- your note names one thing you still do not understand
-
-Stop there.

@@ -1,384 +1,330 @@
-# Week 01: Coding Agent Turn Loop And Baseline
+# Week 01: Build The First Coding Agent Turn Loop
 
 This week teaches the first habit of building a Claude Code-style coding agent:
 
 ```text
-understand the agent loop before you trust the agent to edit code
+a coding agent is a stateful loop, not just a chatbot response
 ```
 
-You will not build file editing yet. You will inspect the reference checkout,
-run the mirrored agent workflow, understand what happens during one prompt, and
-write your first baseline note.
+You will build the smallest useful mental model of a coding agent turn. No file
+editing yet. No shell execution yet. The goal is to understand the loop that all
+later features plug into.
 
 Work through this file from top to bottom. Every task appears inside the lesson
 at the moment you need it.
 
 ## Step 1: Understand The Job Of Week 01
 
-The goal this week is not to clone all of Claude Code. The goal is to understand
-the smallest useful loop behind a coding agent.
-
-The workflow is:
+A normal chatbot can answer a question from text. A coding agent has to keep
+track of more state:
 
 ```text
-1. receive a user request
-2. inspect the current repo context
-3. choose relevant commands and tools
-4. run one agent turn
-5. store the transcript
-6. report what happened
+1. what the user asked for
+2. what repo context is available
+3. which tools might be useful
+4. what happened during this turn
+5. why the turn stopped
+6. what should be remembered next time
 ```
 
-For Week 01, the trusted reference is the local checkout in:
+This week, we build the first version of that shape:
 
 ```text
-reference/claw-code/
+prompt -> route -> turn result -> transcript
 ```
 
-That repo is not the course implementation. It is the source shape we inspect
-before building our own smaller version.
+That is the core loop. Everything else in the course makes this loop more real.
 
-## Step 2: Learn The Coding Agent Mental Model
+## Step 2: Learn The Five Objects
 
-A normal chatbot answers from conversation context. A coding agent has to work
-inside a repo.
-
-That means every useful turn needs more than a prompt:
+The first version of the agent needs five objects:
 
 ```text
-user request:
-    what the human wants
+Prompt:
+    the user's request
 
-repo context:
-    files, project shape, tests, current changes
+Tool:
+    a named capability the agent may use later
 
-tool surface:
-    actions the agent is allowed to take
+Route:
+    the agent's guess about which tools matter
 
-transcript:
-    what already happened in this session
+TurnResult:
+    the result of one agent turn
 
-result:
-    the answer, patch, test result, or next decision
+Transcript:
+    the memory trail across turns
 ```
 
-The first useful coding-agent question is:
+Keep them small. Good coding-agent systems start boring and explicit.
+
+## Step 3: Write The Smallest Data Model
+
+Start with plain Python dataclasses:
+
+```python
+from dataclasses import dataclass, field
+
+
+@dataclass(frozen=True)
+class Tool:
+    name: str
+    description: str
+
+
+@dataclass(frozen=True)
+class Route:
+    prompt: str
+    matched_tools: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class TurnResult:
+    prompt: str
+    message: str
+    matched_tools: tuple[str, ...]
+    stop_reason: str
+
+
+@dataclass
+class Transcript:
+    entries: list[str] = field(default_factory=list)
+
+    def append(self, text: str) -> None:
+        self.entries.append(text)
+
+    def replay(self) -> tuple[str, ...]:
+        return tuple(self.entries)
+```
+
+Read this as the first version of memory:
 
 ```text
-What does the agent need to know before it edits anything?
+each turn can append what happened
+later turns can replay the previous entries
 ```
 
-If you skip that question, the agent starts making random changes. If you answer
-it well, the agent becomes much easier to trust.
+That tiny transcript will become important once the agent edits files, runs
+tests, and needs to explain what it already tried.
 
-## Step 3: Learn The Words Prompt, Command, Tool, Turn, And Transcript
+## Step 4: Add A Tiny Tool Inventory
 
-Claude Code-style systems use these ideas constantly:
+A Claude Code-style agent has a tool surface. The first version can be only
+metadata:
 
-- **prompt** means the user's request for this turn
-- **command** means a named workflow the agent can route to
-- **tool** means an external action like reading files or running shell commands
-- **turn** means one cycle of request, routing, action, and response
-- **transcript** means the stored history of the session
+```python
+TOOLS = (
+    Tool(
+        name="read_file",
+        description="Read a file before deciding what to change.",
+    ),
+    Tool(
+        name="edit_file",
+        description="Apply a small, reviewable code edit.",
+    ),
+    Tool(
+        name="run_tests",
+        description="Run the project test command and report the result.",
+    ),
+)
+```
 
-For now, keep the model simple:
+These tools do not execute yet. Week 01 only teaches selection.
+
+The useful question is:
+
+```text
+Given this prompt, which tools sound relevant?
+```
+
+That question is routing.
+
+## Step 5: Build A Naive Router
+
+The first router can be simple keyword matching:
+
+```python
+def route_prompt(prompt: str, tools: tuple[Tool, ...] = TOOLS) -> Route:
+    lowered = prompt.lower()
+    matches: list[str] = []
+
+    if any(word in lowered for word in ("read", "inspect", "open", "look")):
+        matches.append("read_file")
+    if any(word in lowered for word in ("change", "edit", "fix", "add")):
+        matches.append("edit_file")
+    if any(word in lowered for word in ("test", "pytest", "fail", "verify")):
+        matches.append("run_tests")
+
+    return Route(prompt=prompt, matched_tools=tuple(matches))
+```
+
+This is not smart. That is fine.
+
+The point is to make routing visible:
 
 ```text
 prompt:
-    "read README and explain the repo"
+    "fix the failing test"
 
-command:
-    a higher-level workflow the agent may choose
-
-tool:
-    a concrete capability the agent may use
-
-turn:
-    one pass through the agent runtime
-
-transcript:
-    the memory trail that lets later turns know what happened
+matched tools:
+    edit_file, run_tests
 ```
 
-You are not building commands or tools this week. You are learning how they fit
-into one agent turn.
+Later, routing can use a model, command registry, permissions, or repo context.
+The first version should be easy to understand.
 
-## Step 4: Inspect The Reference Surface
+## Step 6: Run One Agent Turn
 
-Move into the reference checkout:
+Now wrap the router in a turn loop:
 
-```bash
-cd reference/claw-code
+```python
+class CodingAgent:
+    def __init__(self) -> None:
+        self.transcript = Transcript()
+
+    def run_turn(self, prompt: str) -> TurnResult:
+        route = route_prompt(prompt)
+        if route.matched_tools:
+            tool_text = ", ".join(route.matched_tools)
+            message = f"I would start with: {tool_text}"
+        else:
+            message = "I need more repo context before choosing a tool."
+
+        result = TurnResult(
+            prompt=prompt,
+            message=message,
+            matched_tools=route.matched_tools,
+            stop_reason="completed",
+        )
+        self.transcript.append(f"user: {prompt}")
+        self.transcript.append(f"agent: {message}")
+        return result
 ```
 
-Run the summary command:
-
-```bash
-python -m src.main summary
-```
-
-This prints the mirrored workspace shape. Read the output as a map:
+This is the first real agent shape:
 
 ```text
-main.py:
-    CLI entrypoint
-
-runtime.py:
-    routes prompts and bootstraps sessions
-
-query_engine.py:
-    stores turns, usage, stop reasons, and transcript state
-
-commands.py:
-    loads the command inventory
-
-tools.py:
-    loads the tool inventory
+receive prompt
+route prompt
+create result
+write transcript
+return result
 ```
 
-This is the first baseline. Before building your own agent, you should know
-which pieces a real reference keeps separate.
+No magic. Just state moving through a loop.
 
-## Step 5: Inspect The CLI Entrypoint
+## Step 7: Try Three Prompts
 
-Open:
+Use the same agent for multiple turns:
+
+```python
+agent = CodingAgent()
+
+print(agent.run_turn("read the README and explain the project"))
+print(agent.run_turn("add a repo map command"))
+print(agent.run_turn("run tests after the change"))
+print(agent.transcript.replay())
+```
+
+Expected behavior:
 
 ```text
-reference/claw-code/src/main.py
+"read the README..." matches read_file
+"add a repo map command" matches edit_file
+"run tests..." matches run_tests
+transcript contains all three user turns and agent messages
 ```
 
-Find the parser commands:
+This is still a toy. But the toy already teaches the core idea: the agent is
+not just one answer. It is a stateful workflow.
+
+## Step 8: Understand Stop Reasons
+
+Every turn should say why it stopped.
+
+For now, use:
 
 ```text
-summary
-commands
-tools
-route
-bootstrap
-turn-loop
-flush-transcript
-load-session
+completed:
+    the turn finished normally
+
+needs_context:
+    the agent cannot choose a next action yet
+
+blocked:
+    the agent knows what to do but is not allowed to do it
+
+error:
+    something failed while running the turn
 ```
 
-Read them as product features:
+Update the no-match branch like this:
+
+```python
+if route.matched_tools:
+    tool_text = ", ".join(route.matched_tools)
+    stop_reason = "completed"
+    message = f"I would start with: {tool_text}"
+else:
+    stop_reason = "needs_context"
+    message = "I need more repo context before choosing a tool."
+```
+
+Stop reasons make the agent debuggable. Later, they decide whether the loop
+continues, asks for permission, runs tests, or reports a failure.
+
+## Step 9: The Week 01 Build
+
+Your build this week is one small file:
 
 ```text
-summary:
-    show what the workspace contains
-
-route:
-    match a prompt to commands and tools
-
-turn-loop:
-    simulate multiple agent turns
-
-flush-transcript:
-    persist session memory
+claudecode/agent.py
 ```
 
-The lesson is not that you need the exact same commands. The lesson is that a
-coding agent needs a visible control surface. If you cannot run and inspect the
-loop, you cannot debug it.
-
-## Step 6: Route One Prompt
-
-Run:
-
-```bash
-python -m src.main route "read README and explain the repo"
-```
-
-The output should list matched commands and tools. The exact matches can change
-as the reference evolves, but the shape should look like this:
+It should contain:
 
 ```text
-command    some-command    score    source-path
-tool       some-tool       score    source-path
+Tool
+Route
+TurnResult
+Transcript
+TOOLS
+route_prompt
+CodingAgent
 ```
 
-Read the result as a sentence:
+Keep the implementation short. The goal is not completeness. The goal is to
+make the turn loop concrete.
 
-```text
-Given this prompt, the runtime found these command and tool candidates.
-```
+## Step 10: Done Checklist
 
-This is not an LLM response yet. It is routing. Routing decides what parts of
-the agent surface are relevant before a turn runs.
+You are done when:
 
-## Step 7: Run A Tiny Turn Loop
+- `CodingAgent.run_turn` accepts a prompt
+- the prompt is routed to zero or more tool names
+- the turn returns a `TurnResult`
+- the turn appends user and agent entries to the transcript
+- the result includes a `stop_reason`
+- you can explain the loop as `prompt -> route -> result -> transcript`
 
-Run:
+Stop there.
 
-```bash
-python -m src.main turn-loop "read README and explain the repo" --max-turns 2
-```
+## Skool Submission
 
-The reference loop prints one section per turn:
-
-```text
-## Turn 1
-Prompt: read README and explain the repo
-Matched commands: ...
-Matched tools: ...
-Permission denials: ...
-stop_reason=completed
-```
-
-Read this as the first skeleton of a coding agent:
-
-```text
-prompt in
-route commands and tools
-record permission state
-produce a turn result
-decide why the turn stopped
-```
-
-Later, your implementation will replace the mirror output with real file reads,
-patches, tests, and repair loops. Week 01 is only about seeing the skeleton.
-
-## Step 8: Inspect The Turn Engine
-
-Open:
-
-```text
-reference/claw-code/src/query_engine.py
-```
-
-Find `QueryEnginePort.submit_message`.
-
-Trace what it does:
-
-```text
-1. checks whether max turns were reached
-2. formats a response summary
-3. updates token usage
-4. appends the prompt to mutable messages
-5. appends the prompt to the transcript store
-6. compacts messages if needed
-7. returns a TurnResult
-```
-
-The important idea is that a turn has state. It is not just a function that
-takes a string and returns a string. It updates memory, usage, permissions, and
-the stop reason.
-
-## Step 9: Inspect Transcript Storage
-
-Open:
-
-```text
-reference/claw-code/src/transcript.py
-```
-
-The transcript store is intentionally small:
-
-```text
-append:
-    add a new entry
-
-compact:
-    keep only recent entries
-
-replay:
-    return stored entries
-
-flush:
-    mark transcript as persisted
-```
-
-This is the second useful coding-agent question:
-
-```text
-What should the next turn remember from this turn?
-```
-
-Without a transcript, every turn starts from zero. With a transcript, the agent
-can build continuity.
-
-## Step 10: Do The Week 01 Task
-
-Your task is to produce one short baseline note:
-
-```text
-results/week-01-baseline.md
-```
-
-Run these commands from `reference/claw-code`:
-
-```bash
-python -m src.main summary
-python -m src.main route "read README and explain the repo"
-python -m src.main turn-loop "read README and explain the repo" --max-turns 2
-```
-
-Then write the note with this structure:
-
-```markdown
-# Week 01 Baseline
-
-## Reference Commands I Ran
-
-- `python -m src.main summary`
-- `python -m src.main route "read README and explain the repo"`
-- `python -m src.main turn-loop "read README and explain the repo" --max-turns 2`
-
-## Reference Surface
-
-Write one sentence each:
-
-- `src/main.py`:
-- `src/runtime.py`:
-- `src/query_engine.py`:
-- `src/commands.py`:
-- `src/tools.py`:
-- `src/transcript.py`:
-
-## Prompt Routing
-
-Paste or summarize the command/tool matches from `route`.
-
-## Turn Loop
-
-Answer these questions:
-
-- What goes into one turn?
-- What comes out of one turn?
-- What does `stop_reason=completed` mean?
-
-## My Coding Agent Mental Model
-
-Write 3-5 sentences in your own words.
-
-## One Thing Still Fuzzy
-
-Write one concept you want to understand better.
-```
-
-Keep it short. If you post in Skool, use this format:
+Use this format:
 
 ```text
 Week 01 Submission
 
-Reference commands:
+My agent loop in one sentence:
 
-My explanation of the coding-agent turn loop:
+The objects I built:
 
-What routing does:
+Example prompt:
 
-Why transcripts matter:
+Matched tools:
+
+What the transcript stores:
 
 One thing I want reviewed:
 ```
-
-## Done Checklist
-
-You are done when:
-
-- `python -m src.main summary` ran, or you recorded the error
-- `python -m src.main route "read README and explain the repo"` ran, or you recorded the error
-- `python -m src.main turn-loop "read README and explain the repo" --max-turns 2` ran, or you recorded the error
-- your note explains prompt, command, tool, turn, and transcript in plain language
-- your note names one thing you still do not understand
-
-Stop there.

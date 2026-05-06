@@ -4,9 +4,8 @@ A practical course and codebase for building a Claude Code-style coding agent
 from scratch: repo inspection, planning, file edits, test runs, patch review,
 retry loops, and shipping workflows.
 
-Reference upstream: `reference/claw-code/` contains a local checkout of the
-open-source `instructkr/claw-code` project and is ignored by Git so the course
-can use it as the source reference.
+Creator note: lessons are informed by real coding-agent systems, but learners
+build the project from scratch. No external repo is required.
 
 ## Portfolio Outcome
 
@@ -31,7 +30,6 @@ can use it as the source reference.
 
 ## Structure
 
-- `reference/claw-code/` contains the upstream reference checkout.
 - `claudecode/` contains the assistant workflow code and CLI.
 - `examples/` contains runnable demos.
 - `tests/` contains correctness checks.
