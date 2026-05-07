@@ -74,7 +74,7 @@ text.
 
 ## Step 3: Define Tool Input And Output
 
-The model sends the whole list every time.
+The model only sends the new full list.
 
 ```python
 @dataclass(frozen=True)
@@ -82,7 +82,15 @@ class TodoWriteInput:
     todos: list[TodoItem]
 ```
 
-The runtime returns old and new state:
+Why the whole list?
+
+```text
+append/update/delete APIs need ids or merge rules
+full replacement is simpler:
+    "this is the current todo state now"
+```
+
+Now define the runtime output:
 
 ```python
 @dataclass(frozen=True)
@@ -92,36 +100,45 @@ class TodoWriteOutput:
     verification_nudge_needed: bool | None = None
 ```
 
-This makes the update reviewable:
+This is the part that can feel confusing:
 
 ```text
 oldTodos:
-    previous saved list
+    loaded by the runtime before writing
+    not sent by the model
 
 newTodos:
-    list the model just requested
+    the full list the model just requested
 ```
+
+You need `oldTodos` so the runtime can show what changed.
+
+For example:
+
+```text
+oldTodos:
+    Add tool: in_progress
+    Run tests: pending
+
+newTodos:
+    Add tool: completed
+    Run tests: in_progress
+```
+
+The model does not need to calculate that diff. The runtime can report it.
 
 ## Step 4: Validate The List
 
-Reject empty lists:
+Validation is intentionally small.
 
 ```python
 def validate_todos(todos: list[TodoItem]) -> None:
     if not todos:
         raise ValueError("todos must not be empty")
-```
 
-Reject blank content:
-
-```python
     if any(not todo.content.strip() for todo in todos):
         raise ValueError("todo content must not be empty")
-```
 
-Reject blank active forms:
-
-```python
     if any(not todo.active_form.strip() for todo in todos):
         raise ValueError("todo activeForm must not be empty")
 ```
@@ -133,7 +150,7 @@ work.
 
 ## Step 5: Choose The Store Path
 
-Persist todos in the current workspace.
+Persist todos in one JSON file.
 
 ```python
 from pathlib import Path
@@ -148,12 +165,12 @@ def todo_store_path() -> Path:
     return Path.cwd() / ".clawd-todos.json"
 ```
 
-The environment override makes tests easy. The default file keeps state local to
-the repo.
+The default file is local to the workspace. The environment override is only so
+tests can write to a temp file.
 
 ## Step 6: Load Old Todos
 
-Read the previous state if it exists.
+Before writing the new list, load the previous saved list.
 
 ```python
 import json
@@ -166,8 +183,6 @@ def load_todos(path: Path) -> list[TodoItem]:
     raw_items = json.loads(path.read_text(encoding="utf-8"))
 ```
 
-Convert JSON objects back into typed todo items:
-
 ```python
     return [
         TodoItem(
@@ -179,18 +194,17 @@ Convert JSON objects back into typed todo items:
     ]
 ```
 
-Notice the JSON field name:
+This is where `oldTodos` comes from:
 
 ```text
-activeForm
+oldTodos = load_todos(path)
 ```
 
-Use camelCase at the tool boundary because that is what the model-facing schema
-uses.
+It is not part of the model input.
 
 ## Step 7: Save Todos
 
-Convert one todo to JSON:
+Save the new list using model-facing field names.
 
 ```python
 def todo_to_json(todo: TodoItem) -> dict:
@@ -200,8 +214,6 @@ def todo_to_json(todo: TodoItem) -> dict:
         "status": todo.status.value,
     }
 ```
-
-Save the list:
 
 ```python
 def save_todos(path: Path, todos: list[TodoItem]) -> None:
@@ -213,11 +225,12 @@ def save_todos(path: Path, todos: list[TodoItem]) -> None:
     )
 ```
 
-Keep this boring. Todo state should be easy to inspect by opening the JSON file.
+The stored JSON uses `activeForm`, not `active_form`, because that is the tool
+schema field name.
 
 ## Step 8: Clear Storage When Everything Is Done
 
-If every todo is completed, save an empty list.
+If every todo is completed, persist an empty list.
 
 ```python
 def persisted_todos(todos: list[TodoItem]) -> list[TodoItem]:
@@ -225,17 +238,23 @@ def persisted_todos(todos: list[TodoItem]) -> list[TodoItem]:
     return [] if all_done else todos
 ```
 
-Why clear it?
+The output still returns the completed `newTodos`.
+
+Only the stored file is cleared.
 
 ```text
-finished sessions should not reopen with stale completed work
+newTodos:
+    shows what was completed in this tool result
+
+.clawd-todos.json:
+    becomes []
 ```
 
-The tool still returns `new_todos` so the transcript records what was completed.
+That prevents the next session from reopening stale finished work.
 
 ## Step 9: Add A Verification Nudge
 
-A useful tiny check:
+The reference adds one tiny hint.
 
 ```python
 def needs_verification_nudge(todos: list[TodoItem]) -> bool | None:
@@ -249,11 +268,17 @@ def needs_verification_nudge(todos: list[TodoItem]) -> bool | None:
     return True if all_done and has_many_steps and not mentions_verification else None
 ```
 
-This does not block the model. It only returns a hint:
+Read it as:
 
 ```text
-you completed several steps, but none looked like verification
+if everything is completed
+and there were at least 3 todos
+and none mention verification
+then return True
 ```
+
+This does not block anything. It is just a nudge that maybe tests or verification
+were skipped.
 
 ## Step 10: Implement `todo_write`
 
@@ -278,10 +303,14 @@ def todo_write(input: TodoWriteInput) -> TodoWriteOutput:
 The key behavior:
 
 ```text
-TodoWrite replaces the whole todo list
+1. validate the new list
+2. load the old saved list
+3. save the new list, or [] if all done
+4. return oldTodos and newTodos
 ```
 
-It is not an append tool. The model sends the current full state.
+That is why `oldTodos` exists: it lets the runtime say "before this call, the
+todo state was X; after this call, the model requested Y."
 
 ## Step 11: Parse Tool Arguments
 
