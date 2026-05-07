@@ -4,7 +4,7 @@
 
 Build a Claude Code-style coding agent from scratch.
 
-YouTube: [coming soon]
+YouTube: https://youtu.be/VpetwCa7-eM
 
 This course teaches the core engineering ideas behind coding agents: tool
 calling, repo context, planning, safe file edits, shell commands, test loops,
