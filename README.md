@@ -32,6 +32,7 @@ build the project from scratch. No external repo is required.
 - `13_compact_context.md`
 - `14_end_to_end_build.md`
 - `15_cli_sessions.md`
+- `16_slash_commands.md`
 
 ## Structure
 
