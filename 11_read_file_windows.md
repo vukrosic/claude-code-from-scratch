@@ -2,13 +2,56 @@
 
 After search finds a file, the agent should not always read the whole file.
 
-The useful pattern is:
+Reading is expensive because every line goes into the next model call.
+
+So the agent should ask:
 
 ```text
-grep_search finds path:line
-read_file reads a small window around that line
-edit_file uses exact text from that window
+What is the smallest useful slice of this file?
 ```
+
+That is what a read window is.
+
+The useful flow is:
+
+```text
+1. grep_search finds path:line
+2. read_file reads a small window around that line
+3. edit_file uses exact text from that window
+```
+
+Here is the difference between the tools:
+
+```text
+grep_search:
+    tells the agent where something appears
+
+read_file:
+    gives the agent the surrounding code
+
+edit_file:
+    changes exact text after the agent has seen enough context
+```
+
+Example:
+
+```text
+grep_search returns:
+    claudecode/conversation_loop.py:84:def run_turn(...)
+
+The agent should not immediately read all of conversation_loop.py.
+
+Instead it can read a window:
+    read_file(path="claudecode/conversation_loop.py", offset=73, limit=40)
+
+That means:
+    start near line 74
+    read 40 lines
+    inspect the area around run_turn
+```
+
+The goal is not to hide information from the model. The goal is to give it the
+right information at the right size.
 
 This week builds `read_file` with `offset` and `limit`.
 
@@ -46,7 +89,22 @@ limit:
     number of lines to return
 ```
 
-The offset is zero-based because it is used for slicing.
+The important idea:
+
+```text
+offset does not mean "line number shown in an editor"
+offset means "how many lines to skip before reading"
+```
+
+So:
+
+```text
+offset=0 starts at line 1
+offset=1 starts at line 2
+offset=41 starts at line 42
+```
+
+That is why `offset` is zero-based.
 
 ## Step 2: Define The Output
 
@@ -86,6 +144,18 @@ total_lines:
 
 Input `offset` is zero-based. Output `start_line` is one-based.
 
+Why both?
+
+```text
+offset:
+    useful for code slicing
+
+start_line:
+    useful for humans and future tool calls
+```
+
+The model needs both the selected text and where that selected text came from.
+
 ## Step 3: Resolve The Path
 
 Use the same basic path rule as earlier tools.
@@ -110,6 +180,20 @@ In a full workspace runtime, this is also where you enforce:
 the resolved path must stay inside the workspace root
 ```
 
+Path resolving matters because the tool should know the real file it read.
+
+For example:
+
+```text
+input path:
+    src/../src/agent.py
+
+resolved path:
+    /repo/src/agent.py
+```
+
+The runtime should operate on the resolved path, not a vague string.
+
 ## Step 4: Reject Huge Files
 
 Do not let `read_file` dump massive files into the model.
@@ -127,6 +211,9 @@ def validate_size(path: Path) -> None:
 ```
 
 This is not just safety. It protects the next model call from being flooded.
+
+If a file is too large, the agent should use search first, or ask for a smaller
+window after locating the relevant area.
 
 ## Step 5: Reject Binary Files
 
@@ -153,6 +240,9 @@ def validate_text_file(path: Path) -> None:
 Coding agents should read source files, not images, lockfiles with binary bytes,
 or compiled artifacts.
 
+If the file is binary, returning "file appears to be binary" is better than
+sending unreadable bytes into the model.
+
 ## Step 6: Read Lines
 
 Now read the text.
@@ -169,6 +259,10 @@ Using `splitlines()` makes line windows straightforward:
 lines[0] is line 1
 lines[1] is line 2
 ```
+
+This lesson intentionally drops trailing newline details. For reading context,
+that is fine. Exact editing still uses `edit_file` with `old_string` from the
+returned content.
 
 ## Step 7: Select The Window
 
@@ -204,6 +298,30 @@ Example:
 offset=10, limit=5
 returns lines 11 through 15
 ```
+
+Here is a tiny table:
+
+```text
+File:
+    line 1: import os
+    line 2: import json
+    line 3: def run_turn():
+    line 4:     pass
+
+ReadFileInput(offset=0, limit=2):
+    returns lines 1-2
+
+ReadFileInput(offset=2, limit=2):
+    returns lines 3-4
+```
+
+The formula is:
+
+```text
+start_line = offset + 1
+```
+
+That is the line number the output should report.
 
 ## Step 8: Implement `read_file`
 
@@ -246,6 +364,17 @@ That is the whole tool:
 path -> validate -> lines -> selected window -> line metadata
 ```
 
+Notice what `read_file` does not do:
+
+```text
+it does not search
+it does not summarize
+it does not edit
+```
+
+It simply returns an exact slice of text plus enough metadata to understand
+where that slice came from.
+
 ## Step 9: Convert Search Hits Into Read Windows
 
 `grep_search` content mode returns lines like:
@@ -254,7 +383,20 @@ path -> validate -> lines -> selected window -> line metadata
 src/agent.py:42:def run_turn(...):
 ```
 
-To inspect around line 42, call:
+That line has three pieces:
+
+```text
+src/agent.py:
+    file path
+
+42:
+    one-based line number
+
+def run_turn(...):
+    matching line content
+```
+
+To inspect exactly from line 42, call:
 
 ```python
 ReadFileInput(
@@ -272,7 +414,9 @@ offset is zero-based
 42 - 1 = 41
 ```
 
-If you want context before the hit:
+Usually you want some context before the hit.
+
+If the hit is line 42 and you want 10 lines before it:
 
 ```python
 line_number = 42
@@ -282,6 +426,50 @@ limit = 30
 ```
 
 That reads roughly 10 lines before and 20 lines after.
+
+Read it slowly:
+
+```text
+line_number:
+    the line number from grep_search
+
+before:
+    how many lines before the hit you want
+
+line_number - before:
+    the first human line you want
+
+line_number - before - 1:
+    convert that human line into zero-based offset
+```
+
+Another example:
+
+```text
+grep hit:
+    app.py:100:class Agent:
+
+want:
+    20 lines before the class
+    60 total lines
+
+calculation:
+    offset = max(0, 100 - 20 - 1)
+    offset = 79
+    limit = 60
+
+read:
+    read_file(path="app.py", offset=79, limit=60)
+```
+
+That returns lines 80 through 139.
+
+This is why `grep_search` and `read_file` work together:
+
+```text
+grep_search gives the line number
+read_file turns that line number into a code window
+```
 
 ## Step 10: Add The Tool Spec
 
