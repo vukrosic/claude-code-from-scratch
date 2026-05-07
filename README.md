@@ -1,5 +1,7 @@
 # Claude Code From Scratch
 
+![Claude Code From Scratch thumbnail](thumbnail.png)
+
 Build a Claude Code-style coding agent from scratch.
 
 YouTube: [coming soon]
