@@ -12,36 +12,9 @@ the hood.
 
 ## What You Will Build
 
-By the end, you will have a small coding-agent framework that can:
-
-- keep a transcript of user, assistant, tool call, and tool result messages
-- expose tools with names, descriptions, and input schemas
-- let the model request tools while the runtime controls execution
-- scan a repo and summarize useful project context
-- draft simple plans for larger changes
-- safely edit files with exact string replacement and reviewable diffs
-- run shell commands and tests through a controlled tool layer
-- keep todo state across multi-step work
-- search files, grep code, and read focused file windows
-- save and resume sessions from JSONL files
-- compact old context when the transcript gets too large
-- run as a CLI with `/status`, `/diff`, `/session list`, and `/resume`
-- keep an interactive REPL session alive across many turns
-
-## What You Will Learn
-
-This project teaches practical AI engineering and software engineering skills:
-
-- how LLM tool calling actually fits into an agent runtime
-- why the model proposes actions but the runtime validates and executes them
-- how to represent messages, tool calls, tool results, and session history
-- how to give the model repo context without flooding the prompt
-- how coding agents search before editing
-- how safe file editing works with `old_string` and `new_string`
-- how to run tests, inspect failures, and retry with new context
-- how CLI agents manage sessions, slash commands, and resume workflows
-- how to design small modules that are easy to test
-- how to turn an AI project into a portfolio-ready GitHub repo
+By the end, you will have a small coding-agent framework with a transcript,
+tool calling, repo mapping, plan mode, safe file edits, bash/test tools, search,
+session resume, slash commands, and an interactive CLI.
 
 ## Course Lessons
 
@@ -63,42 +36,16 @@ This project teaches practical AI engineering and software engineering skills:
 - `16_slash_commands.md` - local slash commands
 - `17_interactive_repl.md` - persistent interactive REPL
 
-## Portfolio Outcome
-
-A finished version of this project should include:
-
-- a public GitHub repo
-- a working demo of the agent loop
-- tests for the core runtime and tools
-- a README explaining the architecture
-- screenshots or terminal output showing the agent using tools
-- a short demo video or write-up explaining what you built
-
-This is meant to be shown as a career portfolio project for AI engineering,
-LLM engineering, coding-agent work, and software engineering roles.
-
 ## Suggested Build Path
 
-If you are doing the Skool challenge, use the lessons in order.
-
-Week 1 starts with Lessons 1-4:
-
-- build the first agent turn loop
-- add repo mapping
-- add plan mode
-- add safe file editing with diffs
-
-Push your own repo to GitHub and post your progress each week.
+Use the lessons in order. For the Skool challenge, Week 1 is Lessons 1-4:
+build the first turn loop, add repo mapping, add plan mode, and implement safe
+file edits with diffs. Push your own repo to GitHub and post progress each week.
 
 ## Project Structure
 
-Suggested structure for your implementation:
-
-- `claudecode/` contains the assistant workflow code and CLI
-- `examples/` contains runnable demos
-- `tests/` contains correctness checks
-- `portfolio/` contains demo notes, screenshots, and resume assets
-- `reference/` can hold private/local notes, but learners do not need an external repo
+Suggested implementation folders: `claudecode/` for agent code, `examples/` for
+demos, `tests/` for checks, and `portfolio/` for demo notes or screenshots.
 
 ## Quickstart
 
