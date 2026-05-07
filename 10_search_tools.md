@@ -2,12 +2,78 @@
 
 A coding agent should not open random files and hope.
 
-The better habit is:
+Search is how the agent narrows the repo before it spends context on reading
+code.
+
+Think of the agent asking three questions:
 
 ```text
-glob_search -> find candidate files
-grep_search -> find matching lines
-read_file -> inspect the exact file window
+1. Which files might matter?
+2. Which lines inside those files mention the thing I care about?
+3. What nearby code do I need to inspect before editing?
+```
+
+Those questions map to three tools:
+
+```text
+glob_search:
+    find candidate files by filename/path
+
+grep_search:
+    find matching lines inside files
+
+read_file:
+    read a focused window around the matching line
+```
+
+Here is the difference:
+
+```text
+glob_search answers:
+    "What files look relevant?"
+
+grep_search answers:
+    "Where is this symbol/text used?"
+
+read_file answers:
+    "What is the actual code around that spot?"
+```
+
+Example:
+
+```text
+User asks:
+    "Change how the agent handles TodoWrite."
+
+The agent should not read every file.
+
+It can first ask:
+    glob_search("**/*todo*.py")
+
+Maybe that returns:
+    claudecode/todos.py
+    tests/test_todos.py
+
+Then it can ask:
+    grep_search("TodoWrite", glob="**/*.py", output_mode="content")
+
+Maybe that returns:
+    claudecode/todos.py:81:class TodoWriteInput:
+    claudecode/todos.py:89:class TodoWriteOutput:
+
+Now it can ask:
+    read_file("claudecode/todos.py", offset=70, limit=50)
+```
+
+That final `read_file` call is the first time the agent spends context on a
+chunk of source code.
+
+The habit is:
+
+```text
+start broad with filenames
+then narrow to matching lines
+then read only the useful code window
 ```
 
 This week builds two read-only search tools:
@@ -56,6 +122,21 @@ truncated:
 ```
 
 Use `glob_search` when the agent knows the file shape but not the exact file.
+
+Common examples:
+
+```text
+"Find Python tests":
+    pattern="tests/**/*.py"
+
+"Find React components":
+    pattern="src/**/*.tsx"
+
+"Find anything with todo in the filename":
+    pattern="**/*todo*"
+```
+
+`glob_search` does not look inside files. It only answers with paths.
 
 ## Step 2: Implement Glob Search
 
@@ -111,6 +192,18 @@ into the next model call.
 
 `grep_search` searches inside files.
 
+Use it when the agent knows a symbol, word, function name, class name, or error
+message and needs to find where it appears.
+
+Examples:
+
+```text
+pattern="TodoWrite"
+pattern="def run_turn"
+pattern="return_code_interpretation"
+pattern="oldTodos"
+```
+
 ```python
 @dataclass(frozen=True)
 class GrepSearchInput:
@@ -143,6 +236,22 @@ output_mode:
 
 head_limit / offset:
     pagination so output stays small
+```
+
+The three output modes mean:
+
+```text
+files_with_matches:
+    return only filenames
+    useful when many files match and you need a shortlist
+
+content:
+    return matching lines
+    useful when you need line numbers before read_file
+
+count:
+    return how many matches exist
+    useful for checking how widespread a symbol is
 ```
 
 ## Step 4: Define Grep Output
@@ -197,6 +306,9 @@ search contents
 limit output
 ```
 
+This function is deliberately simple. It gives `grep_search` the list of files
+it is allowed to inspect, then later filters decide which ones to skip.
+
 ## Step 6: Filter Files
 
 Support the two useful filters from the tool input:
@@ -233,6 +345,22 @@ Examples:
 ```text
 glob="**/*.py"
 type="rs"
+```
+
+Use filters when the repo is large.
+
+For example:
+
+```text
+pattern="run_turn"
+glob="**/*.py"
+```
+
+That means:
+
+```text
+search for run_turn,
+but only inside Python files
 ```
 
 ## Step 7: Add Pagination
@@ -317,6 +445,8 @@ Use this when the agent asks:
 how often does this symbol appear?
 ```
 
+If the count is huge, the agent should search more narrowly before reading.
+
 ## Step 10: Support File And Content Modes
 
 For normal search, scan line by line:
@@ -336,6 +466,20 @@ For normal search, scan line by line:
 ```
 
 Default mode only needs filenames.
+
+That means this:
+
+```text
+output_mode="files_with_matches"
+```
+
+answers:
+
+```text
+these files contain the pattern
+```
+
+It does not show the matching code.
 
 Content mode returns matching lines:
 
@@ -359,6 +503,20 @@ Content mode returns matching lines:
 
 The line prefix matters because the next tool call will usually be `read_file`
 with a specific path and line window.
+
+For example, if content mode returns:
+
+```text
+src/agent.py:42:def run_turn(...):
+```
+
+the agent can now read a focused window:
+
+```text
+read_file(path="src/agent.py", offset=32, limit=30)
+```
+
+That gives enough surrounding code without reading the whole file.
 
 ## Step 11: Return The Result
 
